@@ -458,6 +458,70 @@ func TestLineageMajorFailureKeepsPreviousDigest(t *testing.T) {
 	}
 }
 
+func TestLineageMajorMakesProgressWhenAnotherBlockFails(t *testing.T) {
+	d := testDB(t)
+	defer d.Close()
+	task, err := d.CreateTask("lineage major partial progress", "lineage major partial progress", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(task.ID) })
+	store := d.Exploration(task.ExplorationID)
+	var pairs [2][]int64
+	var stamps []db.StampOp
+	for i := range 4 {
+		id, err := store.AddIntent(map[string]any{"summary": fmt.Sprintf("settled work %d", i)}, 1, nil, "planner")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SetIntentState(id, "done"); err != nil {
+			t.Fatal(err)
+		}
+		pairs[i/2] = append(pairs[i/2], id)
+		stamps = append(stamps, db.StampOp{ID: id, Set: true, Round: 0})
+	}
+	if err := store.ApplyStampOps(stamps); err != nil {
+		t.Fatal(err)
+	}
+	oldIDs := make([]int64, 2)
+	for i, pair := range pairs {
+		if err := store.Link(pair[0], db.RelDerivedFrom, pair[1]); err != nil {
+			t.Fatal(err)
+		}
+		oldIDs[i], err = store.AddDigest(map[string]any{"body": "old", "signature": fmt.Sprintf("stale-%d", i), "member_ids": map[string]any{"intents": pair}}, pair)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	calls := 0
+	c := NewCompactor(nil, "")
+	c.params.R = 0
+	c.prov = captureUsageProvider{stream: func(_ context.Context, yield func(llm.StreamEvent, error) bool) {
+		calls++
+		text := ""
+		if calls > 1 {
+			text = "successful independent block"
+		}
+		yield(llm.StreamEvent{Type: llm.SETextDelta, Text: text}, nil)
+	}}
+	c.major(context.Background(), store)
+	if calls != 2 {
+		t.Fatalf("calls=%d want one failed and one successful block", calls)
+	}
+	first, err := store.GetNode(oldIDs[0])
+	if err != nil || first.State != db.StateDigestActive {
+		t.Fatalf("failed block old digest state=%q err=%v", first.State, err)
+	}
+	second, err := store.GetNode(oldIDs[1])
+	if err != nil || second.State != db.StateDigestSuperseded {
+		t.Fatalf("successful block old digest state=%q err=%v", second.State, err)
+	}
+	active, err := store.ActiveDigests()
+	if err != nil || len(active) != 2 {
+		t.Fatalf("active digests=%+v err=%v", active, err)
+	}
+}
+
 func TestLineageDigestCommitSerializesConcurrentGraphChanges(t *testing.T) {
 	for _, tt := range lineageGraphMutations() {
 		t.Run(tt.name, func(t *testing.T) {

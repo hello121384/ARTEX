@@ -218,8 +218,8 @@ func (c *Compactor) minor(ctx context.Context, ts *db.ExplorationStore) {
 }
 
 // major re-derives the whole grouping from source over ALL eligible-cold nodes.
-// Replacements are generated before the old digests are touched, then committed
-// in one transaction so a failed LLM call never exposes an uncovered history gap.
+// Each replacement is generated before its old digest is touched and committed
+// independently, so one failed block neither loses coverage nor blocks other blocks.
 func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 	round, err := ts.RoundNo()
 	if err != nil {
@@ -270,25 +270,66 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 		}
 		retained[sig] = true
 	}
-	creations := make([]db.LineageDigestCreation, 0, len(toCreate))
+	pending := make(map[int64]bool, len(stale))
+	for _, id := range stale {
+		pending[id] = true
+	}
+	hasReplacement := map[int64]bool{}
 	for _, b := range toCreate {
+		replacements := overlappingStaleDigests(active, pending, b.Members)
+		for _, id := range replacements {
+			hasReplacement[id] = true
+		}
 		prepared, err := c.prepareBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, active))
 		if err != nil {
-			log.Printf("[compaction] major prepare exp=%d block=%v: %v; keeping previous digests", ts.ID(), b.Members, err)
-			return
+			log.Printf("[compaction] major prepare exp=%d block=%v: %v; keeping previous digest", ts.ID(), b.Members, err)
+			continue
 		}
-		creations = append(creations, db.LineageDigestCreation{
+		replacements = overlappingStaleDigests(active, pending, prepared.block.Members)
+		creation := db.LineageDigestCreation{
 			Payload:   prepared.payload,
 			MemberIDs: prepared.block.Members,
 			Check:     lineageDigestSnapshotCheck(ts, prepared.block, prepared.signature, prepared.input),
-		})
+		}
+		if err := ts.ReplaceLineageDigests(ctx, []db.LineageDigestCreation{creation}, replacements); err != nil {
+			log.Printf("[compaction] major replace exp=%d block=%v: %v", ts.ID(), b.Members, err)
+			continue
+		}
+		for _, id := range replacements {
+			delete(pending, id)
+		}
 	}
-	if len(stale) == 0 && len(creations) == 0 {
-		return
+	var orphaned []int64
+	for id := range pending {
+		if !hasReplacement[id] {
+			orphaned = append(orphaned, id)
+		}
 	}
-	if err := ts.ReplaceLineageDigests(ctx, creations, stale); err != nil {
-		log.Printf("[compaction] major replace exp=%d: %v", ts.ID(), err)
+	if len(orphaned) > 0 {
+		if err := ts.ReplaceLineageDigests(ctx, nil, orphaned); err != nil {
+			log.Printf("[compaction] major retire exp=%d: %v", ts.ID(), err)
+		}
 	}
+}
+
+func overlappingStaleDigests(active []*db.Node, pending map[int64]bool, members []int64) []int64 {
+	memberSet := make(map[int64]bool, len(members))
+	for _, id := range members {
+		memberSet[id] = true
+	}
+	var out []int64
+	for _, digest := range active {
+		if !pending[digest.ID] {
+			continue
+		}
+		for _, member := range digestMemberIDs(digest) {
+			if memberSet[member] {
+				out = append(out, digest.ID)
+				break
+			}
+		}
+	}
+	return out
 }
 
 type preparedLineageDigest struct {
