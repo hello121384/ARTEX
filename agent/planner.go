@@ -319,11 +319,11 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 
 **每次唤醒的决策流程**：
 
-1. **本轮态势已附在本提示下方**（与 graph_overview 同源的只读视图，可能是紧凑文本或完整 JSON）：task、资产计数、goals+状态、open/running/recent_done 意图、facts/findings 统计、recent_facts，以及历史 Digest 正文、工作状态、关键结果、未完成原因和来源 ID。需要完整结构化快照时调 graph_overview；折叠历史用 expand_digest(id)，完整证据用 node_detail(id)。未直接显示不等于未测试。
+1. **本轮态势已附在本提示下方**（与 graph_overview 同源的只读视图，可能是紧凑文本或完整 JSON）：task、资产计数、goals+状态、open/running/recent_done 意图、facts/findings 统计、recent_facts，以及历史 Digest 正文、工作状态、关键结果、未完成原因和来源 ID。需要完整结构化快照时调 graph_overview；拿不准历史是否覆盖某资产、机理或状态时，用 search_history 数据库检索（不要只凭标题目录断言未测）；折叠历史用 expand_digest(id)，完整证据用 node_detail(id)。未直接显示不等于未测试。
    - **范围**：探索节点（goals/意图/facts/findings）只含本任务；**资产图全局共享**（多任务同一份，资产计数是全局在范围内的、非本任务独有）——出现非本任务相关的资产时忽略。
    - **血缘**：每个意图带 parents（上游：派生自哪些事实/意图）和 yields（下游：产生了哪些事实/发现），recent_facts 每条带 from_intent；据此理解"哪些事实来自哪个方向、能否综合出新方向"。
    - **否定/存疑观察**（recent_facts 里"端口关闭/不可注入"等）是 worker 的观察、不是定论：采信前先 node_detail(id) 看 evidence——evidence 扎实、confidence=observed 且手段已穷尽的才视为该方向暂时封住；evidence 缺失、只是"看起来像/只探一次"、或 confidence=inferred 的，按【尚未探明】处理，若在范围内且无其它意图覆盖，默认派一条复核意图去证实或推翻（**同一否定方向至多复核一次**；复核后仍为否定、且证据合理，就尊重该结论、不再派）。
-   - **要更深细节才按需调**：list_facts（分页，最新在前，默认 20，可 q 过滤、before 翻页，带 total/has_more）、list_findings（全部漏洞）、node_detail(id)（完整证据/详情；列表/recent_facts 只给摘要）、list_assets（pull：q 搜索、type/company_id/task_id 过滤、分页，或 id/ids 直取）、asset_neighbors。资产全局共享，别默认拉全量。
+   - **要更深细节才按需调**：search_history（统一历史索引，可按 q/kinds/states/asset_id 过滤并分页）、list_facts（只查 Fact）、list_findings（全部漏洞）、expand_digest(id)（折叠成员）、node_detail(id)（完整证据）、list_assets（资产检索）、asset_neighbors。资产全局共享，别默认拉全量。
 
 2. **判目标（核心职责）**：goals 字段已含目标与状态；对已被某发现/事实证明的未达成目标，调 prove_goal(goal_id, evidence_id, reason) 标 met。**当你标记的恰是最后一个未完成目标时，系统自动判定整个任务完成**——收官只由逐个 prove_goal 驱动，没有别的"一键完成"手段。
    - ⚠️ **量化验收核对（严禁提前盖章）**：目标含可量化条件（覆盖度达 X%、达到指定数量、获得某权限）时，prove_goal 前【必须】核对上方 graph_overview 的实测值（coverage.pct、findings_total 计数等）：未达标就【禁止】prove_goal，改派意图补差；不得以"大体达成/核心已拿下"为由提前标 met。例：要求覆盖度 100% 而实测 coverage.pct=40% → 未达成，继续派补测意图。

@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/Autumn-27/artex/db"
 	actool "github.com/Autumn-27/norma/tool"
@@ -206,16 +205,10 @@ func digestCardTitle(digest *db.Node) string {
 		Body  string `json:"body"`
 	}
 	_ = json.Unmarshal(digest.Payload, &payload)
-	title := strings.TrimSpace(payload.Title)
-	if title == "" {
-		title = strings.TrimSpace(strings.Split(payload.Body, "\n")[0])
+	if title := digestTopicTitle(payload.Body); title != "历史探索分组" {
+		return title
 	}
-	title = strings.TrimLeft(title, "#* ")
-	runes := []rune(title)
-	if len(runes) > 48 {
-		return string(runes[:48]) + "…"
-	}
-	return title
+	return digestTopicTitle(payload.Title)
 }
 
 func coldDigestsRecentView(view *lineageDigestView, cap int) (shown []map[string]any, moreIDs []int64, titles []map[string]any) {

@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -375,6 +376,8 @@ func (c *Compactor) foldBlock(ctx context.Context, ts *db.ExplorationStore, g *c
 	return nil
 }
 
+var errLineageSummaryIncomplete = errors.New("incomplete body from model")
+
 func (c *Compactor) prepareBlock(ctx context.Context, ts *db.ExplorationStore, g *coldGraph, b block, nodeByID map[int64]*db.Node, cvers map[int64]int, generation int) (*preparedLineageDigest, error) {
 	currentGraph, current, currentNodes, currentVersions := g, b, nodeByID, cvers
 	for attempt := 0; attempt < 2; attempt++ {
@@ -382,7 +385,14 @@ func (c *Compactor) prepareBlock(ctx context.Context, ts *db.ExplorationStore, g
 		body, err := c.compress(compressCtx, currentGraph, current, currentNodes)
 		cancel()
 		if err != nil {
-			return nil, err
+			if !errors.Is(err, errLineageSummaryIncomplete) {
+				return nil, err
+			}
+			body = deterministicLineageBody(current, currentNodes)
+			if body == "" {
+				return nil, err
+			}
+			log.Printf("[compaction] deterministic fallback exp=%d block=%v: %v", ts.ID(), current.Members, err)
 		}
 		fresh, freshNodes, err := loadColdGraph(ts)
 		if err != nil {
@@ -656,21 +666,63 @@ func applyStampsInPlace(stamps map[int64]*int64, ops []stampOp) {
 
 // --- helpers: digest payload ---
 
-func digestTopicTitle(b block, nodeByID map[int64]*db.Node) string {
-	candidates := append([]int64(nil), b.Anchors...)
-	candidates = append(candidates, b.Members...)
-	for _, id := range candidates {
-		title := strings.TrimSpace(nodeSummary(nodeByID[id]))
-		if title == "" {
+func digestTopicTitle(body string) string {
+	parts := strings.FieldsFunc(body, func(r rune) bool {
+		return r == '\n' || r == '。' || r == '！' || r == '？' || r == '!' || r == '?'
+	})
+	title := ""
+	if len(parts) > 0 {
+		title = strings.TrimLeft(strings.TrimSpace(parts[0]), "#* ")
+	}
+	if title == "" {
+		return "历史探索分组"
+	}
+	runes := []rune(title)
+	if len(runes) > 48 {
+		return string(runes[:48]) + "…"
+	}
+	return title
+}
+
+func lineageExcerpt(text string, limit int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	runes := []rune(text)
+	if len(runes) > limit {
+		return string(runes[:limit]) + "…"
+	}
+	return text
+}
+
+// deterministicLineageBody keeps a failed model block recoverable without
+// inventing conclusions: it only labels and excerpts the member source text.
+func deterministicLineageBody(b block, nodeByID map[int64]*db.Node) string {
+	var work, result string
+	for _, id := range b.Members {
+		n := nodeByID[id]
+		if n == nil {
 			continue
 		}
-		runes := []rune(title)
-		if len(runes) > 48 {
-			return string(runes[:48]) + "…"
+		switch n.Kind {
+		case db.KindIntent:
+			if work == "" {
+				work = nodeSummary(n)
+			}
+		case db.KindFact, db.KindFinding:
+			if result == "" {
+				result = nodeSummary(n)
+			}
 		}
-		return title
 	}
-	return "历史探索分组"
+	if work != "" && result != "" {
+		return "工作：" + lineageExcerpt(work, 80) + "。结果：" + lineageExcerpt(result, 110) + "。"
+	}
+	if result != "" {
+		return "观察：" + lineageExcerpt(result, 190) + "。"
+	}
+	if work != "" {
+		return "工作：" + lineageExcerpt(work, 190) + "。"
+	}
+	return ""
 }
 
 // digestPayload builds the digest node payload (cold-digest §1): the body, the
@@ -686,7 +738,7 @@ func digestPayload(body string, b block, nodeByID map[int64]*db.Node, generation
 		}
 	}
 	return map[string]any{
-		"title":      digestTopicTitle(b, nodeByID),
+		"title":      digestTopicTitle(body),
 		"body":       body,
 		"member_ids": map[string]any{"facts": facts, "intents": intents},
 		"anchor_ids": b.Anchors,
@@ -841,7 +893,7 @@ func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByI
 	}
 	switch strings.ToLower(stopReason) {
 	case "max_tokens", "length":
-		return "", fmt.Errorf("incomplete body from model: stop_reason=%s", stopReason)
+		return "", fmt.Errorf("%w: stop_reason=%s", errLineageSummaryIncomplete, stopReason)
 	case "", "stop", "end_turn", "stop_sequence", "complete", "completed":
 	default:
 		return "", fmt.Errorf("invalid body completion: stop_reason=%s", stopReason)

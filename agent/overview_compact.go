@@ -193,7 +193,7 @@ func ovDigestTitles(b *overviewWriter, titles []map[string]any) {
 		return
 	}
 	b.record()
-	fmt.Fprintf(b, "【历史标题目录】共%d组；先按标题查重，摘要与证据按需 expand_digest(id)。\n", len(titles))
+	fmt.Fprintf(b, "【历史标题目录】共%d组；按标题初筛，精确查重用 search_history；摘要与证据按需 expand_digest(id)。\n", len(titles))
 	for _, item := range titles {
 		b.record()
 		fmt.Fprintf(b, "- #%s %s（成员=%s）\n",
