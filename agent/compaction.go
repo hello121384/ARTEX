@@ -34,20 +34,22 @@ import (
 
 // Compactor performs background cold-node compaction for many explorations.
 type Compactor struct {
-	prov     llm.Provider
-	model    string
-	params   coldParams
-	n, m     int           // minor / major thresholds (§7 N=20, M=8)
-	cooldown time.Duration // min gap between compactions per task (§7 60s)
-	maxDur   time.Duration // hard cap on one background compaction
+	prov            llm.Provider
+	model           string
+	params          coldParams
+	n, m            int           // minor / major thresholds (§7 N=20, M=8)
+	cooldown        time.Duration // min gap between compactions per task (§7 60s)
+	failureCooldown time.Duration // suppress repeated calls for an unchanged failed block
+	maxDur          time.Duration // hard cap on one background compaction
 
-	mu      sync.Mutex
-	running map[int64]bool
-	lastRun map[int64]time.Time
+	mu       sync.Mutex
+	running  map[int64]bool
+	lastRun  map[int64]time.Time
+	failures map[string]time.Time
 }
 
 const (
-	maxLineageBlockMembers    = 8
+	maxLineageBlockMembers    = 4
 	maxLineageBlockInputRunes = 8000
 )
 
@@ -55,15 +57,17 @@ const (
 // (same model the agent runs on, per §4). A nil Compactor is a safe no-op.
 func NewCompactor(prov llm.Provider, model string) *Compactor {
 	return &Compactor{
-		prov:     prov,
-		model:    model,
-		params:   defaultColdParams(),
-		n:        20,
-		m:        8,
-		cooldown: 60 * time.Second,
-		maxDur:   5 * time.Minute,
-		running:  map[int64]bool{},
-		lastRun:  map[int64]time.Time{},
+		prov:            prov,
+		model:           model,
+		params:          defaultColdParams(),
+		n:               20,
+		m:               8,
+		cooldown:        60 * time.Second,
+		failureCooldown: 10 * time.Minute,
+		maxDur:          5 * time.Minute,
+		running:         map[int64]bool{},
+		lastRun:         map[int64]time.Time{},
+		failures:        map[string]time.Time{},
 	}
 }
 
@@ -212,7 +216,11 @@ func (c *Compactor) minor(ctx context.Context, ts *db.ExplorationStore) {
 		if ctx.Err() != nil {
 			return
 		}
-		c.foldBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, nil))
+		if c.failedBlock(b, cvers) {
+			continue
+		}
+		err := c.foldBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, nil))
+		c.noteBlockResult(b, cvers, err == nil)
 	}
 	// A minor may have pushed the segment count over M → merge in the same run.
 	if ad, e := ts.ActiveDigests(); e == nil && len(ad) >= c.m {
@@ -285,6 +293,9 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 		if ctx.Err() != nil {
 			return
 		}
+		if c.failedBlock(b, cvers) {
+			continue
+		}
 		replacements := overlappingStaleDigests(active, pending, b.Members)
 		for _, id := range replacements {
 			hasReplacement[id] = true
@@ -292,6 +303,7 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 		prepared, err := c.prepareBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, active))
 		if err != nil {
 			log.Printf("[compaction] major prepare exp=%d block=%v: %v; keeping previous digest", ts.ID(), b.Members, err)
+			c.noteBlockResult(b, cvers, false)
 			continue
 		}
 		replacements = overlappingStaleDigests(active, pending, prepared.block.Members)
@@ -302,8 +314,10 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 		}
 		if err := ts.ReplaceLineageDigests(ctx, []db.LineageDigestCreation{creation}, replacements); err != nil {
 			log.Printf("[compaction] major replace exp=%d block=%v: %v", ts.ID(), b.Members, err)
+			c.noteBlockResult(b, cvers, false)
 			continue
 		}
+		c.noteBlockResult(b, cvers, true)
 		for _, id := range replacements {
 			delete(pending, id)
 		}
@@ -348,15 +362,17 @@ type preparedLineageDigest struct {
 	input     string
 }
 
-func (c *Compactor) foldBlock(ctx context.Context, ts *db.ExplorationStore, g *coldGraph, b block, nodeByID map[int64]*db.Node, cvers map[int64]int, generation int) {
+func (c *Compactor) foldBlock(ctx context.Context, ts *db.ExplorationStore, g *coldGraph, b block, nodeByID map[int64]*db.Node, cvers map[int64]int, generation int) error {
 	prepared, err := c.prepareBlock(ctx, ts, g, b, nodeByID, cvers, generation)
 	if err != nil {
 		log.Printf("[compaction] compress exp=%d block=%v: %v", ts.ID(), b.Members, err)
-		return
+		return err
 	}
 	if _, err := addLineageDigestChecked(ctx, ts, prepared.payload, prepared.block, prepared.signature, prepared.input); err != nil {
 		log.Printf("[compaction] add digest exp=%d: %v", ts.ID(), err)
+		return err
 	}
+	return nil
 }
 
 func (c *Compactor) prepareBlock(ctx context.Context, ts *db.ExplorationStore, g *coldGraph, b block, nodeByID map[int64]*db.Node, cvers map[int64]int, generation int) (*preparedLineageDigest, error) {
@@ -473,6 +489,25 @@ func (c *Compactor) finish(expID int64) {
 	defer c.mu.Unlock()
 	c.running[expID] = false
 	c.lastRun[expID] = time.Now()
+}
+
+func (c *Compactor) failedBlock(b block, versions map[int64]int) bool {
+	signature := blockSignature(b, versions)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	failedAt, ok := c.failures[signature]
+	return ok && c.failureCooldown > 0 && time.Since(failedAt) < c.failureCooldown
+}
+
+func (c *Compactor) noteBlockResult(b block, versions map[int64]int, success bool) {
+	signature := blockSignature(b, versions)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if success {
+		delete(c.failures, signature)
+	} else {
+		c.failures[signature] = time.Now()
+	}
 }
 
 // --- helpers: db ↔ coldgraph ---
@@ -797,7 +832,7 @@ func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByI
 	req := llm.CompletionRequest{
 		System:    []string{compressionSystemPrompt},
 		Messages:  []llm.Message{llm.UserText(buildCompressionInput(g, b, nodeByID))},
-		MaxTokens: 1200,
+		MaxTokens: 600,
 		Thinking:  "disabled",
 	}
 	msg, stopReason, _, err := c.prov.Complete(ctx, req)
@@ -819,14 +854,4 @@ func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByI
 }
 
 // compressionSystemPrompt is the §4 body prompt.
-const compressionSystemPrompt = `你在压缩一组【彼此关联】的探索节点，产出供 Planner 决策的导航摘要(body)，不是证据文档。
-
-输入包括节点 id、类型、summary、state，以及可能存在的 confidence、conditions、blocked_reason 和血缘边。共同父只是上下文，不是压缩成员。覆盖数量、全部 Fact、Intent 真实状态和完整证据由程序另行提供，不要在 body 重复这些清单。
-
-body 写 2–4 个短段，不加标题、不列执行步骤：
-1. 概括按资产或问题机理区分的探索方向；不同方向不要揉成一个结论。
-2. 保留重要正向发现、可利用链路和凭证/数据暴露，但每个方向只写结论和代表来源 id，不复述接口参数、响应字段或操作过程。
-3. 否定、冲突和证据边界按方向归纳，只适用于输入给出的范围和 conditions；区分 observed / inferred。保留 blocked、exhausted、stopped 的关键原因。
-4. 最后说明未完成边界和需人工处理事项；没有则写“无遗留未完成事项”。
-
-相同主题可以合并，不同结论必须分清。通常 300–600 字，内容少时更短；不要为追求完整而复制证据。只写输入支持的内容，不脑补，只输出 body 正文。`
+const compressionSystemPrompt = `把这组探索节点写成供 Planner 查重的导航摘要，不是证据文档。只输出 1–2 句、最多 220 字：先说做过什么，再说最关键的正向发现或未完成边界；没有正向发现就概括主要否定范围。最多引用 3 个代表来源 id。不要写覆盖数量，不要罗列接口、参数、响应字段、执行步骤或全部 Fact，这些信息由程序另行展示。observed 与 inferred 不得混淆，不得脑补。`

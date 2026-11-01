@@ -106,6 +106,25 @@ func TestLineageCompressionRejectsTruncatedBody(t *testing.T) {
 	}
 }
 
+func TestLineageFailureCooldownFollowsBlockSignature(t *testing.T) {
+	c := NewCompactor(nil, "")
+	b := block{Members: []int64{1, 2}}
+	versions := map[int64]int{1: 1, 2: 1}
+	c.noteBlockResult(b, versions, false)
+	if !c.failedBlock(b, versions) {
+		t.Fatal("unchanged failed block was retried immediately")
+	}
+	versions[2] = 2
+	if c.failedBlock(b, versions) {
+		t.Fatal("changed block was suppressed by the old signature")
+	}
+	versions[2] = 1
+	c.noteBlockResult(b, versions, true)
+	if c.failedBlock(b, versions) {
+		t.Fatal("successful retry did not clear the failure")
+	}
+}
+
 func TestLineageCompressionInputIncludesDecisionBoundaries(t *testing.T) {
 	nodes := map[int64]*db.Node{
 		1: {ID: 1, Kind: db.KindIntent, State: "done", Payload: json.RawMessage(`{"summary":"parent"}`)},
@@ -448,6 +467,7 @@ func TestLineageMajorFailureKeepsPreviousDigest(t *testing.T) {
 	}
 	c := NewCompactor(nil, "")
 	c.params.R = 0
+	c.failureCooldown = 0
 	c.prov = captureUsageProvider{stream: func(_ context.Context, yield func(llm.StreamEvent, error) bool) {
 		yield(llm.StreamEvent{Type: llm.SETextDelta, Text: ""}, nil)
 	}}
