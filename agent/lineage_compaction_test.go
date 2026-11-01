@@ -336,6 +336,128 @@ func TestLineageDigestCommitRejectsStaleSnapshots(t *testing.T) {
 	}
 }
 
+func TestLineageSplitBlockIsStableBoundedAndLossless(t *testing.T) {
+	const memberCount = 85
+	nodes := make(map[int64]*db.Node, memberCount+5)
+	cgNodes := make([]cgNode, 0, memberCount+5)
+	members := make([]int64, 0, memberCount+5)
+	for i := 1; i <= memberCount+5; i++ {
+		id := int64(i)
+		kind := db.KindFact
+		state := "confirmed"
+		if i%3 == 0 {
+			kind = db.KindIntent
+			state = "done"
+		}
+		nodes[id] = &db.Node{ID: id, Kind: kind, State: state, Payload: json.RawMessage(fmt.Sprintf(`{"summary":"%s"}`, strings.Repeat(fmt.Sprintf("work-%d ", i), 12)))}
+		cgNodes = append(cgNodes, cgNode{ID: id, Kind: kind, State: state})
+		if i <= memberCount {
+			members = append(members, id)
+		}
+	}
+	g := newColdGraph(cgNodes, nil)
+	c := NewCompactor(nil, "")
+	original := block{Members: members}
+	parts := c.splitBlocks(g, original, nodes)
+	if len(parts) < 6 {
+		t.Fatalf("85 nodes produced only %d parts", len(parts))
+	}
+	var flattened []int64
+	var firstPart []int64
+	for i, part := range parts {
+		if len(part.Members) < 2 || len(part.Members) > maxLineageBlockMembers {
+			t.Fatalf("part %d has invalid size %d", i, len(part.Members))
+		}
+		if i == 0 {
+			firstPart = append([]int64(nil), part.Members...)
+		}
+		flattened = append(flattened, part.Members...)
+	}
+	if len(flattened) != memberCount {
+		t.Fatalf("got %d members want %d", len(flattened), memberCount)
+	}
+	for i, id := range flattened {
+		if id != int64(i+1) {
+			t.Fatalf("member %d = %d", i, id)
+		}
+	}
+	extended := original
+	extended.Members = append(append([]int64(nil), members...), 86, 87, 88, 89, 90)
+	reparts := c.splitBlocks(g, extended, nodes)
+	if len(reparts) == 0 || fmt.Sprint(reparts[0].Members) != fmt.Sprint(firstPart) {
+		t.Fatalf("first stable part changed from %v to %v", firstPart, reparts[0].Members)
+	}
+}
+
+func TestLineageMajorNeededOnlyWhenDesiredBlocksChange(t *testing.T) {
+	nodes := map[int64]*db.Node{
+		1: {ID: 1, Kind: db.KindIntent, State: "done", Payload: json.RawMessage(`{"summary":"one"}`)},
+		2: {ID: 2, Kind: db.KindIntent, State: "done", Payload: json.RawMessage(`{"summary":"two"}`)},
+	}
+	g := newColdGraph([]cgNode{{ID: 1, Kind: db.KindIntent, State: "done"}, {ID: 2, Kind: db.KindIntent, State: "done"}}, []cgEdge{{From: 1, Rel: db.RelDerivedFrom, To: 2}})
+	b := block{Members: []int64{1, 2}}
+	versions := map[int64]int{1: 1, 2: 1}
+	signature := blockSignature(b, versions)
+	payload := digestPayload("unchanged", b, nodes, 1, signature)
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewCompactor(nil, "")
+	c.m = 2
+	active := []*db.Node{{ID: 10, Payload: raw}, {ID: 11, Payload: raw}}
+	if !c.majorNeeded(g, nodes, map[int64]bool{1: true, 2: true}, versions, active) {
+		t.Fatal("duplicate active coverage should require reconciliation")
+	}
+	active = active[:1]
+	c.m = 1
+	if c.majorNeeded(g, nodes, map[int64]bool{1: true, 2: true}, versions, active) {
+		t.Fatal("unchanged desired block should not trigger major")
+	}
+	versions[2] = 2
+	if !c.majorNeeded(g, nodes, map[int64]bool{1: true, 2: true}, versions, active) {
+		t.Fatal("changed member version should trigger major")
+	}
+}
+
+func TestLineageMajorFailureKeepsPreviousDigest(t *testing.T) {
+	store, b, payload, _, _ := lineageCommitFixture(t, "lineage major failure keeps old")
+	if err := store.ApplyStampOps([]db.StampOp{{ID: b.Members[0], Set: true, Round: 0}, {ID: b.Members[1], Set: true, Round: 0}}); err != nil {
+		t.Fatal(err)
+	}
+	payload["signature"] = "stale-major-input"
+	oldID, err := store.AddDigest(payload, b.Members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewCompactor(nil, "")
+	c.params.R = 0
+	c.prov = captureUsageProvider{stream: func(_ context.Context, yield func(llm.StreamEvent, error) bool) {
+		yield(llm.StreamEvent{Type: llm.SETextDelta, Text: ""}, nil)
+	}}
+	c.major(context.Background(), store)
+	active, err := store.ActiveDigests()
+	if err != nil || len(active) != 1 || active[0].ID != oldID {
+		t.Fatalf("failed major replaced old digest: active=%+v err=%v", active, err)
+	}
+	members, err := store.DigestMembers(oldID)
+	if err != nil || fmt.Sprint(members) != fmt.Sprint(b.Members) {
+		t.Fatalf("failed major removed old covers: %v err=%v", members, err)
+	}
+	c.prov = captureUsageProvider{stream: func(_ context.Context, yield func(llm.StreamEvent, error) bool) {
+		yield(llm.StreamEvent{Type: llm.SETextDelta, Text: "complete replacement"}, nil)
+	}}
+	c.major(context.Background(), store)
+	active, err = store.ActiveDigests()
+	if err != nil || len(active) != 1 || active[0].ID == oldID {
+		t.Fatalf("successful major did not replace old digest: active=%+v err=%v", active, err)
+	}
+	old, err := store.GetNode(oldID)
+	if err != nil || old.State != db.StateDigestSuperseded {
+		t.Fatalf("old digest state=%q err=%v", old.State, err)
+	}
+}
+
 func TestLineageDigestCommitSerializesConcurrentGraphChanges(t *testing.T) {
 	for _, tt := range lineageGraphMutations() {
 		t.Run(tt.name, func(t *testing.T) {

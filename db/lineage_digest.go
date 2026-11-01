@@ -86,24 +86,85 @@ func (s *ExplorationStore) ReadGraphTx(tx *sql.Tx) ([]*Node, []Edge, error) {
 	return nodes, edges, rows.Err()
 }
 
+type LineageDigestCreation struct {
+	Payload   map[string]any
+	MemberIDs []int64
+	Check     LineageDigestCheck
+}
+
 func (s *ExplorationStore) AddLineageDigestChecked(ctx context.Context, payload map[string]any, memberIDs []int64, check LineageDigestCheck) (int64, error) {
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return 0, err
-	}
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, err := s.beginLineageDigestTx(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
-	// The table lock prevents graph writers from changing the checked snapshot before commit.
-	if _, err := tx.ExecContext(ctx, `LOCK TABLE exploration_nodes, exploration_edges IN SHARE ROW EXCLUSIVE MODE`); err != nil {
-		return 0, err
-	}
 	if check != nil {
 		if err := check(tx); err != nil {
 			return 0, err
 		}
+	}
+	id, err := s.insertLineageDigestTx(ctx, tx, payload, memberIDs)
+	if err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
+}
+
+func (s *ExplorationStore) ReplaceLineageDigests(ctx context.Context, creations []LineageDigestCreation, supersedeIDs []int64) error {
+	tx, err := s.beginLineageDigestTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, creation := range creations {
+		if creation.Check != nil {
+			if err := creation.Check(tx); err != nil {
+				return err
+			}
+		}
+	}
+	for _, creation := range creations {
+		if _, err := s.insertLineageDigestTx(ctx, tx, creation.Payload, creation.MemberIDs); err != nil {
+			return err
+		}
+	}
+	for _, id := range supersedeIDs {
+		result, err := tx.ExecContext(ctx, `UPDATE exploration_nodes SET state=$1
+WHERE id=$2 AND exploration_id=$3 AND kind=$4 AND state=$5`, StateDigestSuperseded, id, s.expID, KindDigest, StateDigestActive)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return ErrLineageDigestSnapshotChanged
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM exploration_edges
+WHERE exploration_id=$1 AND src_id=$2 AND rel=$3`, s.expID, id, RelCovers); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *ExplorationStore) beginLineageDigestTx(ctx context.Context) (*sql.Tx, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `LOCK TABLE exploration_nodes, exploration_edges IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	return tx, nil
+}
+
+func (s *ExplorationStore) insertLineageDigestTx(ctx context.Context, tx *sql.Tx, payload map[string]any, memberIDs []int64) (int64, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return 0, err
 	}
 	var id int64
 	if err := tx.QueryRowContext(ctx, `
@@ -119,5 +180,5 @@ ON CONFLICT (exploration_id, src_id, rel, dst_id) DO NOTHING`, s.expID, id, RelC
 			return 0, err
 		}
 	}
-	return id, tx.Commit()
+	return id, nil
 }

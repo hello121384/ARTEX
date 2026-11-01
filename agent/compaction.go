@@ -46,6 +46,11 @@ type Compactor struct {
 	lastRun map[int64]time.Time
 }
 
+const (
+	maxLineageBlockMembers    = 16
+	maxLineageBlockInputRunes = 12000
+)
+
 // NewCompactor builds a compactor. prov/model are used for the §4 body LLM call
 // (same model the agent runs on, per §4). A nil Compactor is a safe no-op.
 func NewCompactor(prov llm.Provider, model string) *Compactor {
@@ -70,13 +75,12 @@ func (c *Compactor) OnPlannerRound(ctx context.Context, ts *db.ExplorationStore)
 	if c == nil || c.prov == nil || ts == nil {
 		return
 	}
-	round, uncompressed, activeDigests, err := c.maintain(ts)
+	round, uncompressed, needMajor, err := c.maintain(ts)
 	if err != nil {
 		log.Printf("[compaction] maintain exp=%d: %v", ts.ID(), err)
 		return
 	}
 	needMinor := uncompressed >= c.n
-	needMajor := activeDigests >= c.m
 	if !needMinor && !needMajor {
 		return
 	}
@@ -103,15 +107,14 @@ func (c *Compactor) OnPlannerRound(ctx context.Context, ts *db.ExplorationStore)
 }
 
 // maintain bumps round_no, recomputes hot/cold over the whole graph, and applies
-// the cold_since_round stamp/clear ops (§2.3). Returns the new round plus the
-// counts that drive the trigger: how many eligible-cold nodes are not yet covered
-// (minor) and how many active digests exist (major).
-func (c *Compactor) maintain(ts *db.ExplorationStore) (round int64, uncompressed, activeDigests int, err error) {
+// the cold_since_round stamp/clear ops. Major is due only when the desired blocks
+// actually differ from active digests, not merely because M digests exist.
+func (c *Compactor) maintain(ts *db.ExplorationStore) (round int64, uncompressed int, needMajor bool, err error) {
 	round, err = ts.BumpRound()
 	if err != nil {
 		return
 	}
-	g, _, err := loadColdGraph(ts)
+	g, nodeByID, err := loadColdGraph(ts)
 	if err != nil {
 		return
 	}
@@ -136,12 +139,38 @@ func (c *Compactor) maintain(ts *db.ExplorationStore) (round int64, uncompressed
 			uncompressed++
 		}
 	}
-	ad, err := ts.ActiveDigests()
+	active, err := ts.ActiveDigests()
 	if err != nil {
 		return
 	}
-	activeDigests = len(ad)
+	if len(active) >= c.m {
+		versions, versionErr := ts.ContentVersions()
+		if versionErr != nil {
+			err = versionErr
+			return
+		}
+		needMajor = c.majorNeeded(g, nodeByID, elig, versions, active)
+	}
 	return
+}
+
+func (c *Compactor) majorNeeded(g *coldGraph, nodeByID map[int64]*db.Node, eligible map[int64]bool, versions map[int64]int, active []*db.Node) bool {
+	if len(active) < c.m {
+		return false
+	}
+	desired := map[string]bool{}
+	for _, b := range c.groupBlocks(g, eligible, nodeByID) {
+		desired[blockSignature(b, versions)] = true
+	}
+	matched := map[string]bool{}
+	for _, digest := range active {
+		signature, _ := digestSigGen(digest)
+		if !desired[signature] || matched[signature] {
+			return true
+		}
+		matched[signature] = true
+	}
+	return len(matched) != len(desired)
 }
 
 // minor folds the not-yet-covered eligible-cold set into new digest segments
@@ -175,7 +204,7 @@ func (c *Compactor) minor(ctx context.Context, ts *db.ExplorationStore) {
 			uncompressed[id] = true
 		}
 	}
-	blocks := g.group(uncompressed, c.params)
+	blocks := c.groupBlocks(g, uncompressed, nodeByID)
 	if len(blocks) == 0 {
 		return // this batch has no ≥2 connected/shared-parent block — nothing to fold (§7)
 	}
@@ -188,11 +217,9 @@ func (c *Compactor) minor(ctx context.Context, ts *db.ExplorationStore) {
 	}
 }
 
-// major re-derives the whole grouping from source over ALL eligible-cold nodes
-// (§5.1 回源重压), then reconciles against the active digests by signature:
-// unchanged blocks keep their digest (no LLM), stale digests are superseded, and
-// new/changed blocks are compressed afresh. This is where tiered fragments of one
-// direction merge and where "later became connected" blocks unify (§5.2).
+// major re-derives the whole grouping from source over ALL eligible-cold nodes.
+// Replacements are generated before the old digests are touched, then committed
+// in one transaction so a failed LLM call never exposes an uncovered history gap.
 func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 	round, err := ts.RoundNo()
 	if err != nil {
@@ -216,7 +243,7 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 	}
 	hot := g.hotSet()
 	elig := g.eligibleCold(g.structuralCold(hot), stamps, round, c.params)
-	blocks := g.group(elig, c.params)
+	blocks := c.groupBlocks(g, elig, nodeByID)
 
 	bySig := map[string]*db.Node{}
 	for _, d := range active {
@@ -229,45 +256,73 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 		sig := blockSignature(b, cvers)
 		desired[sig] = true
 		if _, ok := bySig[sig]; ok {
-			continue // unchanged → reuse the existing digest, skip LLM (§5.3)
+			continue
 		}
 		toCreate = append(toCreate, b)
 	}
-	// Supersede stale digests FIRST (atomic drop of their covers edges) so a member
-	// is never covered by both an old and a new digest (§5.1 one-member-one-digest).
 	var stale []int64
+	retained := map[string]bool{}
 	for _, d := range active {
 		sig, _ := digestSigGen(d)
-		if !desired[sig] {
+		if !desired[sig] || retained[sig] {
 			stale = append(stale, d.ID)
+			continue
 		}
+		retained[sig] = true
 	}
-	if err := ts.SupersedeDigests(stale); err != nil {
-		log.Printf("[compaction] supersede exp=%d: %v", ts.ID(), err)
-	}
+	creations := make([]db.LineageDigestCreation, 0, len(toCreate))
 	for _, b := range toCreate {
-		c.foldBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, active))
+		prepared, err := c.prepareBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, active))
+		if err != nil {
+			log.Printf("[compaction] major prepare exp=%d block=%v: %v; keeping previous digests", ts.ID(), b.Members, err)
+			return
+		}
+		creations = append(creations, db.LineageDigestCreation{
+			Payload:   prepared.payload,
+			MemberIDs: prepared.block.Members,
+			Check:     lineageDigestSnapshotCheck(ts, prepared.block, prepared.signature, prepared.input),
+		})
+	}
+	if len(stale) == 0 && len(creations) == 0 {
+		return
+	}
+	if err := ts.ReplaceLineageDigests(ctx, creations, stale); err != nil {
+		log.Printf("[compaction] major replace exp=%d: %v", ts.ID(), err)
 	}
 }
 
-// foldBlock regenerates the body if members or their versions change during
-// compression. It commits only when the body and final block describe the same
-// stable snapshot; a continuously changing block is left for a later run.
+type preparedLineageDigest struct {
+	block     block
+	payload   map[string]any
+	signature string
+	input     string
+}
+
 func (c *Compactor) foldBlock(ctx context.Context, ts *db.ExplorationStore, g *coldGraph, b block, nodeByID map[int64]*db.Node, cvers map[int64]int, generation int) {
+	prepared, err := c.prepareBlock(ctx, ts, g, b, nodeByID, cvers, generation)
+	if err != nil {
+		log.Printf("[compaction] compress exp=%d block=%v: %v", ts.ID(), b.Members, err)
+		return
+	}
+	if _, err := addLineageDigestChecked(ctx, ts, prepared.payload, prepared.block, prepared.signature, prepared.input); err != nil {
+		log.Printf("[compaction] add digest exp=%d: %v", ts.ID(), err)
+	}
+}
+
+func (c *Compactor) prepareBlock(ctx context.Context, ts *db.ExplorationStore, g *coldGraph, b block, nodeByID map[int64]*db.Node, cvers map[int64]int, generation int) (*preparedLineageDigest, error) {
 	currentGraph, current, currentNodes, currentVersions := g, b, nodeByID, cvers
 	for attempt := 0; attempt < 2; attempt++ {
 		body, err := c.compress(ctx, currentGraph, current, currentNodes)
 		if err != nil {
-			log.Printf("[compaction] compress exp=%d block=%v: %v", ts.ID(), current.Members, err)
-			return
+			return nil, err
 		}
 		fresh, freshNodes, err := loadColdGraph(ts)
 		if err != nil {
-			return
+			return nil, err
 		}
 		freshVersions, err := ts.ContentVersions()
 		if err != nil {
-			return
+			return nil, err
 		}
 		freshHot := fresh.hotSet()
 		members := make([]int64, 0, len(current.Members))
@@ -277,21 +332,21 @@ func (c *Compactor) foldBlock(ctx context.Context, ts *db.ExplorationStore, g *c
 			}
 		}
 		if len(members) < c.params.K {
-			return
+			return nil, db.ErrLineageDigestSnapshotChanged
 		}
 		final := block{Members: members, Anchors: current.Anchors}
 		signature := blockSignature(final, freshVersions)
 		if signature == blockSignature(current, currentVersions) {
-			payload := digestPayload(body, final, freshNodes, generation, signature)
-			input := buildCompressionInput(currentGraph, current, currentNodes)
-			if _, err := addLineageDigestChecked(ctx, ts, payload, final, signature, input); err != nil {
-				log.Printf("[compaction] add digest exp=%d: %v", ts.ID(), err)
-			}
-			return
+			return &preparedLineageDigest{
+				block:     final,
+				payload:   digestPayload(body, final, freshNodes, generation, signature),
+				signature: signature,
+				input:     buildCompressionInput(currentGraph, current, currentNodes),
+			}, nil
 		}
 		currentGraph, current, currentNodes, currentVersions = fresh, final, freshNodes, freshVersions
 	}
-	log.Printf("[compaction] skip unstable block exp=%d members=%v", ts.ID(), current.Members)
+	return nil, db.ErrLineageDigestSnapshotChanged
 }
 
 func lineageDigestSnapshotCheck(ts *db.ExplorationStore, b block, signature, input string) db.LineageDigestCheck {
@@ -369,6 +424,77 @@ func (c *Compactor) finish(expID int64) {
 }
 
 // --- helpers: db ↔ coldgraph ---
+
+func (c *Compactor) groupBlocks(g *coldGraph, set map[int64]bool, nodeByID map[int64]*db.Node) []block {
+	var out []block
+	for _, b := range g.group(set, c.params) {
+		out = append(out, c.splitBlocks(g, b, nodeByID)...)
+	}
+	return out
+}
+
+func (c *Compactor) splitBlocks(g *coldGraph, b block, nodeByID map[int64]*db.Node) []block {
+	if len(b.Members) < c.params.K {
+		return nil
+	}
+	var parts []block
+	current := make([]int64, 0, min(len(b.Members), maxLineageBlockMembers))
+	flush := func() {
+		if len(current) == 0 {
+			return
+		}
+		members := append([]int64(nil), current...)
+		parts = append(parts, block{Members: members, Anchors: lineageBlockAnchors(g, members)})
+		current = make([]int64, 0, min(len(b.Members), maxLineageBlockMembers))
+	}
+	for _, id := range b.Members {
+		candidate := append(append([]int64(nil), current...), id)
+		candidateBlock := block{Members: candidate, Anchors: lineageBlockAnchors(g, candidate)}
+		tooLarge := len(candidate) > maxLineageBlockMembers || len([]rune(buildCompressionInput(g, candidateBlock, nodeByID))) > maxLineageBlockInputRunes
+		if len(current) >= c.params.K && tooLarge {
+			flush()
+		}
+		current = append(current, id)
+	}
+	flush()
+	if len(parts) > 1 && len(parts[len(parts)-1].Members) < c.params.K {
+		last := parts[len(parts)-1].Members[0]
+		previous := parts[len(parts)-2].Members
+		if len(previous) == c.params.K {
+			parts[len(parts)-2].Members = append(previous, last)
+			parts = parts[:len(parts)-1]
+		} else {
+			parts[len(parts)-2].Members = previous[:len(previous)-1]
+			parts[len(parts)-1].Members = []int64{previous[len(previous)-1], last}
+		}
+	}
+	for i := range parts {
+		parts[i].Anchors = lineageBlockAnchors(g, parts[i].Members)
+	}
+	return parts
+}
+
+func lineageBlockAnchors(g *coldGraph, members []int64) []int64 {
+	memberSet := make(map[int64]bool, len(members))
+	for _, id := range members {
+		memberSet[id] = true
+	}
+	anchorSet := map[int64]bool{}
+	for _, id := range members {
+		for _, parent := range g.parents[id] {
+			if memberSet[parent] || g.nodes[parent].Kind == db.KindDigest {
+				continue
+			}
+			anchorSet[parent] = true
+		}
+	}
+	anchors := make([]int64, 0, len(anchorSet))
+	for id := range anchorSet {
+		anchors = append(anchors, id)
+	}
+	sort.Slice(anchors, func(i, j int) bool { return anchors[i] < anchors[j] })
+	return anchors
+}
 
 // loadColdGraph reads the exploration's nodes + edges and builds the cold-graph
 // view plus an id→node index (for summaries/payload during compression).
@@ -532,10 +658,17 @@ func nodeConditions(n *db.Node) string {
 // lineage. Anchors provide context but are not compression members.
 func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) string {
 	memberSet := make(map[int64]bool, len(b.Members))
+	intentCount, factCount := 0, 0
 	for _, m := range b.Members {
 		memberSet[m] = true
+		if n := nodeByID[m]; n != nil && n.Kind == db.KindIntent {
+			intentCount++
+		} else {
+			factCount++
+		}
 	}
 	var sb strings.Builder
+	fmt.Fprintf(&sb, "【压缩范围】本块包含 %d 个 Intent、%d 条 Fact，共 %d 个节点。\n", intentCount, factCount, len(b.Members))
 	sb.WriteString("【成员节点（要压缩的）】：\n")
 	for _, m := range b.Members {
 		n := nodeByID[m]
@@ -560,7 +693,6 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 		sb.WriteString(line)
 		sb.WriteByte('\n')
 	}
-	// internal edges among members
 	var edgeLines []string
 	for _, m := range b.Members {
 		for _, to := range g.children[m] {
@@ -595,7 +727,7 @@ func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByI
 	req := llm.CompletionRequest{
 		System:    []string{compressionSystemPrompt},
 		Messages:  []llm.Message{llm.UserText(buildCompressionInput(g, b, nodeByID))},
-		MaxTokens: 1500,
+		MaxTokens: 2500,
 		Thinking:  "disabled",
 	}
 	msg, _, _, err := c.prov.Complete(ctx, req)
@@ -610,14 +742,14 @@ func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByI
 }
 
 // compressionSystemPrompt is the §4 body prompt.
-const compressionSystemPrompt = `你在压缩一组【彼此关联】的探索节点，产出综合结论(body)，供规划者快速判断这片历史做过什么、发现什么、还有什么不能视为完成。
+const compressionSystemPrompt = `你在压缩一组【彼此关联】的探索节点，产出综合结论(body)，供规划者快速判断这片历史做了什么、发现什么、还有什么不能视为完成。
 
-输入包括节点的 id、类型、summary、state，以及可能存在的 confidence、conditions、blocked_reason 和血缘边。共同父只是上下文，不是压缩成员。系统会另行展示全部 Fact 摘要、Intent 真实状态和来源引用，不要在 body 复制这些清单。
+输入先给出本块 Intent/Fact 数量，再列出节点 id、类型、summary、state，以及可能存在的 confidence、conditions、blocked_reason 和血缘边。共同父只是上下文，不是压缩成员。系统会另行展示全部 Fact 摘要、Intent 真实状态和来源引用，不要在 body 机械复制这些清单。
 
-body 只写 2–4 句导航摘要，不分节、不列点：
-1. 概括共同方向、最关键的正向发现、否定或冲突，以及最重要的未完成边界；相同主题合并，不逐节点复述。
-2. 否定只适用于输入给出的范围和 conditions；observed / inferred 必须区分。blocked、exhausted、stopped 只点明关键状态和原因。
-3. 用代表来源 id 支持结论（如“…（#12,#28）”），不要编造事实。
-4. 通常 80–220 字，最多 300 字。不要罗列接口、参数、payload、账号、路径或执行步骤；具体事实、状态和完整细节由结构化字段及原节点回源展示。
+body 按内容分成 2–5 个短段，必须包含：
+1. 首句准确说明本摘要覆盖的 Intent、Fact 数量，并概括按资产或问题机理划分的语义方向；不要把互不相关的方向说成一件事。
+2. 所有重要正向发现、可利用链路和凭证/数据暴露必须逐项保留，不得因篇幅省略，也不得用“等”“其余”吞掉。每个独立结论附代表来源 id。
+3. 否定、冲突和证据边界按方向归纳，只适用于输入给出的范围和 conditions；observed / inferred 必须区分。blocked、exhausted、stopped 保留关键原因。
+4. 最后交代未完成边界、仍需人工处理的事项和可回源的代表 id。没有则明确写“无遗留未完成事项”。
 
-只输出 body 正文本身。`
+相同主题可以合并，不逐条复述执行步骤；但不同结论必须分别说清。长度随有效结论数量自适应，通常 200–800 字，内容多时可以更长，不设固定字数硬上限。只写输入支持的内容，不脑补。只输出 body 正文本身。`
