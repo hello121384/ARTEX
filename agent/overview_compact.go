@@ -78,6 +78,7 @@ func plannerOverviewText(data map[string]any) string {
 		b.record()
 		fmt.Fprintf(&b, "【历史恢复入口】Digest ID: %s；使用 expand_digest(id) 查阅，完整 ID 列表见 graph_overview。\n", ovText(strings.Join(digestIDs, ","), 8000))
 	}
+	ovDigestTitles(&b, ovMaps(data["cold_digest_titles"]))
 
 	// Bound high-priority sections separately so a long goal or hint cannot hide live work.
 	running := ovMaps(data["running_intents"])
@@ -94,7 +95,7 @@ func plannerOverviewText(data map[string]any) string {
 	ovRows(&b, "开放意图 open_intents", ovMaps(data["open_intents"]), "summary", 340, 30)
 	ovRows(&b, "近期发现 finding_list", ovMaps(data["finding_list"]), "summary", 340, 10)
 	ovRows(&b, "近期事实 recent_facts", ovMaps(data["recent_facts"]), "summary", 340, 20)
-	ovDigests(&b, ovMaps(data["cold_digests"]), data["cold_digests_more"], 11000, 1800)
+	ovDigests(&b, ovMaps(data["cold_digests"]), data["cold_digests_more"], 7000, 700)
 	ovRows(&b, "近期完成/中断 recent_done_intents", ovMaps(data["recent_done_intents"]), "summary", 340, 12)
 
 	sources := ovMaps(data["related_tasks"])
@@ -128,7 +129,8 @@ func plannerOverviewText(data map[string]any) string {
 				fmt.Fprintf(&b, "  来源资产覆盖: tested=%s denominator=%s pct=%s\n",
 					ovText(cov["tested"], 20), ovText(cov["denominator"], 20), ovPct(cov["pct"]))
 			}
-			ovDigests(&b, ovMaps(src["cold_digests"]), src["cold_digests_more"], 3200, 1000)
+			ovDigestTitles(&b, ovMaps(src["cold_digest_titles"]))
+			ovDigests(&b, ovMaps(src["cold_digests"]), src["cold_digests_more"], 2400, 500)
 			if src["summary_truncated"] == true {
 				b.WriteString("  来源快照有截断；详情可按节点 ID 调阅。\n")
 			}
@@ -186,16 +188,29 @@ func ovRows(b *overviewWriter, title string, rows []map[string]any, field string
 	}
 }
 
+func ovDigestTitles(b *overviewWriter, titles []map[string]any) {
+	if len(titles) == 0 {
+		return
+	}
+	b.record()
+	fmt.Fprintf(b, "【历史标题目录】共%d组；先按标题查重，摘要与证据按需 expand_digest(id)。\n", len(titles))
+	for _, item := range titles {
+		b.record()
+		fmt.Fprintf(b, "- #%s %s（成员=%s）\n",
+			ovText(item["id"], 24), ovText(item["title"], 80), ovText(item["member_count"], 20))
+	}
+}
+
 func ovDigests(b *overviewWriter, digests []map[string]any, more any, bodyBudget, perBody int) {
 	if len(digests) == 0 && ovIDs(more) == "" {
 		return
 	}
 	b.record()
-	fmt.Fprintf(b, "【历史 Digest】显示%d段\n", len(digests))
+	fmt.Fprintf(b, "【精选历史摘要】显示%d段；完整证据按需 expand_digest(id)。\n", len(digests))
 	for _, d := range digests {
 		b.record()
 		id := ovText(d["id"], 24)
-		fmt.Fprintf(b, "- Digest #%s（成员=%s）\n", id, ovText(d["member_count"], 20))
+		fmt.Fprintf(b, "- Digest #%s %s（成员=%s）\n", id, ovText(d["title"], 80), ovText(d["member_count"], 20))
 		b.record()
 		original, _ := d["body"].(string)
 		runes := []rune(original)
@@ -222,7 +237,7 @@ func ovDigests(b *overviewWriter, digests []map[string]any, more any, bodyBudget
 			}
 		}
 		bodyBudget -= len(runes)
-		ovDigestDecisions(b, d)
+		ovDigestDecisions(b, d, id)
 	}
 	if ids := ovIDs(more); ids != "" {
 		b.record()
@@ -230,7 +245,7 @@ func ovDigests(b *overviewWriter, digests []map[string]any, more any, bodyBudget
 	}
 }
 
-func ovDigestDecisions(b *overviewWriter, digest map[string]any) {
+func ovDigestDecisions(b *overviewWriter, digest map[string]any, digestID string) {
 	if work := ovMaps(digest["work"]); len(work) > 0 {
 		parts := make([]string, 0, len(work))
 		for _, item := range work {
@@ -238,7 +253,12 @@ func ovDigestDecisions(b *overviewWriter, digest map[string]any) {
 		}
 		fmt.Fprintf(b, "  工作状态: %s\n", strings.Join(parts, " "))
 	}
-	for _, result := range ovMaps(digest["key_results"]) {
+	results := ovMaps(digest["key_results"])
+	for i, result := range results {
+		if i >= 3 {
+			fmt.Fprintf(b, "  其余 Fact %d 条未展开；完整证据: expand_digest(%s)。\n", len(results)-i, digestID)
+			break
+		}
 		b.record()
 		fmt.Fprintf(b, "  - Fact #%s [%s/%s] %s",
 			ovText(result["fact_id"], 24), ovText(result["state"], 20),

@@ -90,6 +90,22 @@ func TestLineageDigestCardKeepsDecisionFields(t *testing.T) {
 	}
 }
 
+func TestLineageCompressionRejectsTruncatedBody(t *testing.T) {
+	nodes := map[int64]*db.Node{
+		1: {ID: 1, Kind: db.KindFact, State: "confirmed", Payload: json.RawMessage(`{"summary":"one"}`)},
+		2: {ID: 2, Kind: db.KindFact, State: "confirmed", Payload: json.RawMessage(`{"summary":"two"}`)},
+	}
+	g := newColdGraph([]cgNode{{ID: 1, Kind: db.KindFact, State: "confirmed"}, {ID: 2, Kind: db.KindFact, State: "confirmed"}}, nil)
+	c := NewCompactor(nil, "")
+	c.prov = captureUsageProvider{stream: func(_ context.Context, yield func(llm.StreamEvent, error) bool) {
+		yield(llm.StreamEvent{Type: llm.SETextDelta, Text: "incomplete sentence"}, nil)
+		yield(llm.StreamEvent{Type: llm.SEMessageDelta, StopReason: "max_tokens"}, nil)
+	}}
+	if _, err := c.compress(context.Background(), g, block{Members: []int64{1, 2}}, nodes); err == nil || !strings.Contains(err.Error(), "max_tokens") {
+		t.Fatalf("truncated body was accepted: %v", err)
+	}
+}
+
 func TestLineageCompressionInputIncludesDecisionBoundaries(t *testing.T) {
 	nodes := map[int64]*db.Node{
 		1: {ID: 1, Kind: db.KindIntent, State: "done", Payload: json.RawMessage(`{"summary":"parent"}`)},

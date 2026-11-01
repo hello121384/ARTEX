@@ -505,10 +505,11 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// cold-digest §6.1: 折叠冷区的 digest body，按最新成员时间降序取前 N；被截的更旧 digest
 	// 只给裸 id（仍可 expand_digest 展开），避免冷区唯一出口被无限拉长。
 	const coldDigestsCap = 15
-	if cds, more := coldDigestsRecentView(digestView, coldDigestsCap); len(cds) > 0 {
-		out["cold_digests"] = cds // [{id, body, member_count}] —— 直接读 body (§6.1)
+	if cds, more, titles := coldDigestsRecentView(digestView, coldDigestsCap); len(cds) > 0 {
+		out["cold_digests"] = cds
+		out["cold_digest_titles"] = titles
 		if len(more) > 0 {
-			out["cold_digests_more"] = more // 被截断的更旧 digest 的 id；用 expand_digest(id) 展开
+			out["cold_digests_more"] = more
 		}
 	}
 	// the original task (root) so the planner always has it, not just the
@@ -813,14 +814,18 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		// §2 cross-task: the source task's folded cold region, read-only, newest-member
 		// first & capped like the current task's. Members (and overflow digests) are
 		// resolvable via expand_digest(id)/node_detail(id), which search source tasks.
-		if cds, more := coldDigestsRecentView(digestView, relatedOverviewMaxDigestsPerSource); len(cds) > 0 {
+		if cds, more, titles := coldDigestsRecentView(digestView, relatedOverviewMaxDigestsPerSource); len(cds) > 0 {
 			for _, cd := range cds {
 				cd["inherited"] = true
 				cd["source_task_id"] = source.Task.TaskID
 			}
+			for _, title := range titles {
+				title["source_task_id"] = source.Task.TaskID
+			}
 			item["cold_digests"] = cds
+			item["cold_digest_titles"] = titles
 			if len(more) > 0 {
-				item["cold_digests_more"] = more // 被截断的更旧 digest 的 id；expand_digest(id) 展开
+				item["cold_digests_more"] = more
 			}
 		}
 		if statsErr == nil {

@@ -7,6 +7,39 @@ import (
 	"unicode/utf8"
 )
 
+func TestPlannerOverviewUsesThreeLayerHistory(t *testing.T) {
+	data := map[string]any{
+		"cold_digest_titles": []map[string]any{
+			{"id": int64(42), "title": "UniAI authentication and SSRF", "member_count": 8},
+			{"id": int64(43), "title": "Older history remains visible", "member_count": 6},
+		},
+		"cold_digests": []map[string]any{{
+			"id": int64(42), "title": "UniAI authentication and SSRF", "member_count": 8, "body": "navigation summary",
+			"key_results": []map[string]any{
+				{"fact_id": int64(1), "summary": "fact one"},
+				{"fact_id": int64(2), "summary": "fact two"},
+				{"fact_id": int64(3), "summary": "fact three"},
+				{"fact_id": int64(4), "summary": "fact four"},
+				{"fact_id": int64(5), "summary": "fact five"},
+			},
+		}},
+	}
+	got := plannerOverviewText(data)
+	for _, want := range []string{
+		"【历史标题目录】共2组", "Older history remains visible", "【精选历史摘要】",
+		"navigation summary", "fact one", "fact three", "其余 Fact 2 条未展开", "expand_digest(42)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("three-layer overview missing %q:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"fact four", "fact five"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("evidence should be deferred to expand_digest: %s", got)
+		}
+	}
+}
+
 func TestPlannerOverviewPreservesDigestDecisionFields(t *testing.T) {
 	data := map[string]any{
 		"task":          map[string]any{"description": "authorized fixture", "goal": "review evidence"},
@@ -170,7 +203,7 @@ func TestPlannerOverviewRecoveryIDsSurviveLargeRecords(t *testing.T) {
 		{"cold_digests": []map[string]any{{"id": 42, "key_results": results}, {"id": 43}}},
 	} {
 		got := plannerOverviewText(data)
-		for _, want := range []string{"Digest ID: 42,43", "expand_digest(id)", "【全局视图截断】"} {
+		for _, want := range []string{"Digest ID: 42,43", "expand_digest(id)"} {
 			if !strings.Contains(got, want) {
 				t.Fatalf("missing %q after truncation", want)
 			}

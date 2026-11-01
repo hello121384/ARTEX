@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/Autumn-27/artex/db"
 	actool "github.com/Autumn-27/norma/tool"
@@ -191,15 +192,33 @@ func digestDecisionFields(view *lineageDigestView, digest *db.Node, detailed boo
 // stay reachable via expand_digest even when not shown inline — cold_digests is the
 // only exit for folded cold nodes. Shared by the current task overview and the
 // read-only related-task overview (§2 cross-task reuse).
-func coldDigestsRecent(store *db.ExplorationStore, cap int) (shown []map[string]any, moreIDs []int64) {
+func coldDigestsRecent(store *db.ExplorationStore, cap int) (shown []map[string]any, moreIDs []int64, titles []map[string]any) {
 	ads, err := store.ActiveDigests()
 	if err != nil || len(ads) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	return coldDigestsRecentView(loadLineageDigestView(store, ads, false), cap)
 }
 
-func coldDigestsRecentView(view *lineageDigestView, cap int) (shown []map[string]any, moreIDs []int64) {
+func digestCardTitle(digest *db.Node) string {
+	var payload struct {
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	_ = json.Unmarshal(digest.Payload, &payload)
+	title := strings.TrimSpace(payload.Title)
+	if title == "" {
+		title = strings.TrimSpace(strings.Split(payload.Body, "\n")[0])
+	}
+	title = strings.TrimLeft(title, "#* ")
+	runes := []rune(title)
+	if len(runes) > 48 {
+		return string(runes[:48]) + "…"
+	}
+	return title
+}
+
+func coldDigestsRecentView(view *lineageDigestView, cap int) (shown []map[string]any, moreIDs []int64, titles []map[string]any) {
 	type dg struct {
 		digest    *db.Node
 		freshness int64
@@ -216,6 +235,9 @@ func coldDigestsRecentView(view *lineageDigestView, cap int) (shown []map[string
 	sort.Slice(items, func(i, j int) bool { return items[i].freshness > items[j].freshness })
 	for i, it := range items {
 		d := it.digest
+		ms := view.members[d.ID]
+		title := digestCardTitle(d)
+		titles = append(titles, map[string]any{"id": d.ID, "title": title, "member_count": len(ms)})
 		if i >= cap {
 			moreIDs = append(moreIDs, d.ID)
 			continue
@@ -224,14 +246,13 @@ func coldDigestsRecentView(view *lineageDigestView, cap int) (shown []map[string
 			Body string `json:"body"`
 		}
 		_ = json.Unmarshal(d.Payload, &p)
-		ms := view.members[d.ID]
-		entry := map[string]any{"id": d.ID, "body": p.Body, "member_count": len(ms)}
+		entry := map[string]any{"id": d.ID, "title": title, "body": p.Body, "member_count": len(ms)}
 		for key, value := range digestDecisionFields(view, d, false) {
 			entry[key] = value
 		}
 		shown = append(shown, entry)
 	}
-	return shown, moreIDs
+	return shown, moreIDs, titles
 }
 
 // hiddenMembersFor returns a predicate telling whether a member is hidden (folded

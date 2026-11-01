@@ -47,8 +47,8 @@ type Compactor struct {
 }
 
 const (
-	maxLineageBlockMembers    = 16
-	maxLineageBlockInputRunes = 12000
+	maxLineageBlockMembers    = 8
+	maxLineageBlockInputRunes = 8000
 )
 
 // NewCompactor builds a compactor. prov/model are used for the §4 body LLM call
@@ -209,6 +209,9 @@ func (c *Compactor) minor(ctx context.Context, ts *db.ExplorationStore) {
 		return // this batch has no ≥2 connected/shared-parent block — nothing to fold (§7)
 	}
 	for _, b := range blocks {
+		if ctx.Err() != nil {
+			return
+		}
 		c.foldBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, nil))
 	}
 	// A minor may have pushed the segment count over M → merge in the same run.
@@ -253,6 +256,9 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 	desired := map[string]bool{}
 	var toCreate []block
 	for _, b := range blocks {
+		if ctx.Err() != nil {
+			return
+		}
 		sig := blockSignature(b, cvers)
 		desired[sig] = true
 		if _, ok := bySig[sig]; ok {
@@ -276,6 +282,9 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 	}
 	hasReplacement := map[int64]bool{}
 	for _, b := range toCreate {
+		if ctx.Err() != nil {
+			return
+		}
 		replacements := overlappingStaleDigests(active, pending, b.Members)
 		for _, id := range replacements {
 			hasReplacement[id] = true
@@ -353,7 +362,9 @@ func (c *Compactor) foldBlock(ctx context.Context, ts *db.ExplorationStore, g *c
 func (c *Compactor) prepareBlock(ctx context.Context, ts *db.ExplorationStore, g *coldGraph, b block, nodeByID map[int64]*db.Node, cvers map[int64]int, generation int) (*preparedLineageDigest, error) {
 	currentGraph, current, currentNodes, currentVersions := g, b, nodeByID, cvers
 	for attempt := 0; attempt < 2; attempt++ {
-		body, err := c.compress(ctx, currentGraph, current, currentNodes)
+		compressCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		body, err := c.compress(compressCtx, currentGraph, current, currentNodes)
+		cancel()
 		if err != nil {
 			return nil, err
 		}
@@ -610,6 +621,23 @@ func applyStampsInPlace(stamps map[int64]*int64, ops []stampOp) {
 
 // --- helpers: digest payload ---
 
+func digestTopicTitle(b block, nodeByID map[int64]*db.Node) string {
+	candidates := append([]int64(nil), b.Anchors...)
+	candidates = append(candidates, b.Members...)
+	for _, id := range candidates {
+		title := strings.TrimSpace(nodeSummary(nodeByID[id]))
+		if title == "" {
+			continue
+		}
+		runes := []rune(title)
+		if len(runes) > 48 {
+			return string(runes[:48]) + "…"
+		}
+		return title
+	}
+	return "历史探索分组"
+}
+
 // digestPayload builds the digest node payload (cold-digest §1): the body, the
 // member ids split by kind (restore cache; source of truth is the covers edges),
 // the anchor ids, the generation, and the change-detection signature.
@@ -623,6 +651,7 @@ func digestPayload(body string, b block, nodeByID map[int64]*db.Node, generation
 		}
 	}
 	return map[string]any{
+		"title":      digestTopicTitle(b, nodeByID),
 		"body":       body,
 		"member_ids": map[string]any{"facts": facts, "intents": intents},
 		"anchor_ids": b.Anchors,
@@ -768,12 +797,19 @@ func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByI
 	req := llm.CompletionRequest{
 		System:    []string{compressionSystemPrompt},
 		Messages:  []llm.Message{llm.UserText(buildCompressionInput(g, b, nodeByID))},
-		MaxTokens: 2500,
+		MaxTokens: 1200,
 		Thinking:  "disabled",
 	}
-	msg, _, _, err := c.prov.Complete(ctx, req)
+	msg, stopReason, _, err := c.prov.Complete(ctx, req)
 	if err != nil {
 		return "", err
+	}
+	switch strings.ToLower(stopReason) {
+	case "max_tokens", "length":
+		return "", fmt.Errorf("incomplete body from model: stop_reason=%s", stopReason)
+	case "", "stop", "end_turn", "stop_sequence", "complete", "completed":
+	default:
+		return "", fmt.Errorf("invalid body completion: stop_reason=%s", stopReason)
 	}
 	body := strings.TrimSpace(msg.Text())
 	if body == "" {
@@ -783,14 +819,14 @@ func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByI
 }
 
 // compressionSystemPrompt is the §4 body prompt.
-const compressionSystemPrompt = `你在压缩一组【彼此关联】的探索节点，产出综合结论(body)，供规划者快速判断这片历史做了什么、发现什么、还有什么不能视为完成。
+const compressionSystemPrompt = `你在压缩一组【彼此关联】的探索节点，产出供 Planner 决策的导航摘要(body)，不是证据文档。
 
-输入先给出本块 Intent/Fact 数量，再列出节点 id、类型、summary、state，以及可能存在的 confidence、conditions、blocked_reason 和血缘边。共同父只是上下文，不是压缩成员。系统会另行展示全部 Fact 摘要、Intent 真实状态和来源引用，不要在 body 机械复制这些清单。
+输入包括节点 id、类型、summary、state，以及可能存在的 confidence、conditions、blocked_reason 和血缘边。共同父只是上下文，不是压缩成员。覆盖数量、全部 Fact、Intent 真实状态和完整证据由程序另行提供，不要在 body 重复这些清单。
 
-body 按内容分成 2–5 个短段，必须包含：
-1. 首句准确说明本摘要覆盖的 Intent、Fact 数量，并概括按资产或问题机理划分的语义方向；不要把互不相关的方向说成一件事。
-2. 所有重要正向发现、可利用链路和凭证/数据暴露必须逐项保留，不得因篇幅省略，也不得用“等”“其余”吞掉。每个独立结论附代表来源 id。
-3. 否定、冲突和证据边界按方向归纳，只适用于输入给出的范围和 conditions；observed / inferred 必须区分。blocked、exhausted、stopped 保留关键原因。
-4. 最后交代未完成边界、仍需人工处理的事项和可回源的代表 id。没有则明确写“无遗留未完成事项”。
+body 写 2–4 个短段，不加标题、不列执行步骤：
+1. 概括按资产或问题机理区分的探索方向；不同方向不要揉成一个结论。
+2. 保留重要正向发现、可利用链路和凭证/数据暴露，但每个方向只写结论和代表来源 id，不复述接口参数、响应字段或操作过程。
+3. 否定、冲突和证据边界按方向归纳，只适用于输入给出的范围和 conditions；区分 observed / inferred。保留 blocked、exhausted、stopped 的关键原因。
+4. 最后说明未完成边界和需人工处理事项；没有则写“无遗留未完成事项”。
 
-相同主题可以合并，不逐条复述执行步骤；但不同结论必须分别说清。长度随有效结论数量自适应，通常 200–800 字，内容多时可以更长，不设固定字数硬上限。只写输入支持的内容，不脑补。只输出 body 正文本身。`
+相同主题可以合并，不同结论必须分清。通常 300–600 字，内容少时更短；不要为追求完整而复制证据。只写输入支持的内容，不脑补，只输出 body 正文。`
