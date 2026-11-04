@@ -512,6 +512,14 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 			out["cold_digests_more"] = more
 		}
 	}
+	const uncompressedColdCap = 20
+	if nodes, more, total := uncompressedColdNodes(digestView, uncompressedColdCap); total > 0 {
+		out["uncompressed_cold_total"] = total
+		out["uncompressed_cold_nodes"] = nodes
+		if len(more) > 0 {
+			out["uncompressed_cold_more"] = more
+		}
+	}
 	// the original task (root) so the planner always has it, not just the
 	// decomposed goals.
 	if description, goal, err := t.ts.Root(); err == nil {
@@ -826,6 +834,17 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 			item["cold_digest_titles"] = titles
 			if len(more) > 0 {
 				item["cold_digests_more"] = more
+			}
+		}
+		if nodes, more, total := uncompressedColdNodes(digestView, relatedOverviewMaxFactsPerSource); total > 0 {
+			for _, node := range nodes {
+				inheritedMap(node, source.Task.TaskID)
+				node["summary"] = budget.take(node["summary"], 400)
+			}
+			item["uncompressed_cold_total"] = total
+			item["uncompressed_cold_nodes"] = nodes
+			if len(more) > 0 {
+				item["uncompressed_cold_more"] = more
 			}
 		}
 		if statsErr == nil {

@@ -2,9 +2,12 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/Autumn-27/artex/db"
 )
 
 func TestPlannerOverviewUsesThreeLayerHistory(t *testing.T) {
@@ -301,5 +304,83 @@ func TestRenderGraphOverviewConverterToggle(t *testing.T) {
 	full := renderGraphOverview(data, false)
 	if !strings.Contains(full, `"recent_facts"`) || !strings.Contains(full, "source fact") || strings.Contains(full, "同源压缩视图") {
 		t.Fatalf("full JSON was not restored: %s", full)
+	}
+}
+
+func TestPlannerOverviewListsUncompressedColdNodes(t *testing.T) {
+	got := plannerOverviewText(map[string]any{
+		"uncompressed_cold_total": 3,
+		"uncompressed_cold_nodes": []map[string]any{
+			{"id": int64(71), "kind": "fact", "state": "confirmed", "summary": "old negative result remains discoverable"},
+			{"id": int64(70), "kind": "intent", "state": "blocked", "summary": "unfinished boundary", "blocked_reason": "fixture unavailable"},
+		},
+		"uncompressed_cold_more": []int64{69},
+	})
+	for _, want := range []string{
+		"【未压缩冷节点】共3条，当前列出2条", "#71 [confirmed] old negative result remains discoverable kind=fact",
+		"#70 [blocked] unfinished boundary kind=intent", "blocked_reason=fixture unavailable",
+		"其他未压缩冷节点 ID: 69", "search_history", "node_detail(id)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("uncompressed cold directory missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestOverviewFindsOldColdNodeOutsideRecentWindow(t *testing.T) {
+	d := testDB(t)
+	defer d.Close()
+	task, err := d.CreateTask("old cold recovery", "old cold recovery", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(task.ID) })
+	store := d.Exploration(task.ExplorationID)
+	oldID, err := store.AddNode(db.KindFact, map[string]any{"summary": "old cold fact outside recent window"}, 0, "confirmed", "worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 25; i++ {
+		if _, err := store.AddNode(db.KindFact, map[string]any{"summary": "newer settled fact"}, 0, "confirmed", "worker", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	live, err := store.AddIntent(map[string]any{"summary": "live work keeps its fact hot"}, 1, nil, "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hotFact, err := store.AddNode(db.KindFact, map[string]any{"summary": "hot fact must stay in recent facts"}, 0, "confirmed", "worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Link(live, db.RelYields, hotFact); err != nil {
+		t.Fatal(err)
+	}
+	covered, err := store.AddNode(db.KindFact, map[string]any{"summary": "covered cold fact only in digest"}, 0, "confirmed", "worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := store.AddNode(db.KindFact, map[string]any{"summary": "second digest member"}, 0, "confirmed", "worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddDigest(map[string]any{"body": "covered history"}, []int64{covered, other}); err != nil {
+		t.Fatal(err)
+	}
+	data := NewToolSet(store, "").graphOverviewData()
+	nodes := data["uncompressed_cold_nodes"].([]map[string]any)
+	ids := map[int64]bool{}
+	for _, node := range nodes {
+		ids[node["id"].(int64)] = true
+	}
+	for _, id := range data["uncompressed_cold_more"].([]int64) {
+		ids[id] = true
+	}
+	if !ids[oldID] || ids[hotFact] || ids[covered] || ids[other] {
+		t.Fatalf("unexpected uncompressed cold directory: shown=%+v more=%+v", nodes, data["uncompressed_cold_more"])
+	}
+	rendered := plannerOverviewText(data)
+	if !strings.Contains(rendered, "其他未压缩冷节点 ID: ") || !strings.Contains(rendered, fmt.Sprint(oldID)) {
+		t.Fatalf("old cold fact has no Planner recovery path:\n%s", rendered)
 	}
 }

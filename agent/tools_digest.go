@@ -56,6 +56,15 @@ func loadLineageDigestView(store *db.ExplorationStore, digests []*db.Node, fullG
 		parents: map[int64][]int64{}, yields: map[int64][]int64{},
 		covered: map[int64]int64{}, hot: map[int64]bool{},
 	}
+	var edges []db.Edge
+	if fullGraph {
+		g, nodes, graphEdges, err := loadColdGraphParts(store)
+		if err == nil {
+			view.nodes = nodes
+			view.hot = g.hotSet()
+			edges = graphEdges
+		}
+	}
 	if len(digests) == 0 {
 		return view
 	}
@@ -75,19 +84,11 @@ func loadLineageDigestView(store *db.ExplorationStore, digests []*db.Node, fullG
 			}
 		}
 	}
-	memberIDs := make([]int64, 0, len(allMembers))
-	for id := range allMembers {
-		memberIDs = append(memberIDs, id)
-	}
-	var edges []db.Edge
-	if fullGraph {
-		g, nodes, graphEdges, err := loadColdGraphParts(store)
-		if err == nil {
-			view.nodes = nodes
-			view.hot = g.hotSet()
-			edges = graphEdges
+	if !fullGraph {
+		memberIDs := make([]int64, 0, len(allMembers))
+		for id := range allMembers {
+			memberIDs = append(memberIDs, id)
 		}
-	} else {
 		nodes, _ := store.NodesByIDs(memberIDs)
 		view.nodes = indexColdNodes(nodes)
 		edges, _ = store.EdgesTouching(memberIDs)
@@ -101,6 +102,32 @@ func loadLineageDigestView(store *db.ExplorationStore, digests []*db.Node, fullG
 		}
 	}
 	return view
+}
+
+func uncompressedColdNodes(view *lineageDigestView, cap int) (shown []map[string]any, moreIDs []int64, total int) {
+	ids := make([]int64, 0)
+	for id, node := range view.nodes {
+		_, covered := view.covered[id]
+		if foldableKind(node.Kind) && !view.hot[id] && !covered {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] > ids[j] })
+	total = len(ids)
+	for i, id := range ids {
+		if i >= cap {
+			moreIDs = append(moreIDs, id)
+			continue
+		}
+		node := view.nodes[id]
+		entry := compactNode(node)
+		entry["kind"] = node.Kind
+		if node.BlockedReason != "" {
+			entry["blocked_reason"] = node.BlockedReason
+		}
+		shown = append(shown, entry)
+	}
+	return shown, moreIDs, total
 }
 
 func digestDecisionFields(view *lineageDigestView, digest *db.Node, detailed bool) map[string]any {

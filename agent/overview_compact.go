@@ -96,6 +96,7 @@ func plannerOverviewText(data map[string]any) string {
 	ovRows(&b, "近期发现 finding_list", ovMaps(data["finding_list"]), "summary", 340, 10)
 	ovRows(&b, "近期事实 recent_facts", ovMaps(data["recent_facts"]), "summary", 340, 20)
 	ovDigests(&b, ovMaps(data["cold_digests"]), data["cold_digests_more"], 7000, 700)
+	ovUncompressedCold(&b, data)
 	ovRows(&b, "近期完成/中断 recent_done_intents", ovMaps(data["recent_done_intents"]), "summary", 340, 12)
 
 	sources := ovMaps(data["related_tasks"])
@@ -131,6 +132,7 @@ func plannerOverviewText(data map[string]any) string {
 			}
 			ovDigestTitles(&b, ovMaps(src["cold_digest_titles"]))
 			ovDigests(&b, ovMaps(src["cold_digests"]), src["cold_digests_more"], 2400, 500)
+			ovUncompressedCold(&b, src)
 			if src["summary_truncated"] == true {
 				b.WriteString("  来源快照有截断；详情可按节点 ID 调阅。\n")
 			}
@@ -174,7 +176,7 @@ func ovRows(b *overviewWriter, title string, rows []map[string]any, field string
 		if v := ovIDs(item["asset_ids"]); v != "" {
 			fmt.Fprintf(b, " asset_ids=[%s]", v)
 		}
-		for _, attr := range []string{"confidence", "from_intent", "source_task_id", "result_summary"} {
+		for _, attr := range []string{"kind", "confidence", "from_intent", "source_task_id", "result_summary", "blocked_reason"} {
 			if v := ovText(item[attr], 300); v != "" {
 				fmt.Fprintf(b, " %s=%s", attr, v)
 			}
@@ -185,6 +187,21 @@ func ovRows(b *overviewWriter, title string, rows []map[string]any, field string
 			}
 		}
 		b.WriteByte('\n')
+	}
+}
+
+func ovUncompressedCold(b *overviewWriter, data map[string]any) {
+	total := ovText(data["uncompressed_cold_total"], 20)
+	if total == "" || total == "0" {
+		return
+	}
+	rows := ovMaps(data["uncompressed_cold_nodes"])
+	b.record()
+	fmt.Fprintf(b, "【未压缩冷节点】共%s条，当前列出%d条；这些节点未被 Digest 覆盖，可用 search_history 查重、node_detail(id) 读取原文。\n", total, len(rows))
+	ovRows(b, "未压缩冷节点目录", rows, "summary", 340, len(rows))
+	if ids := ovIDs(data["uncompressed_cold_more"]); ids != "" {
+		b.record()
+		fmt.Fprintf(b, "  其他未压缩冷节点 ID: %s；可用 search_history 或 node_detail(id) 回源。\n", ids)
 	}
 }
 
