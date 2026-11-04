@@ -385,14 +385,7 @@ func (c *Compactor) prepareBlock(ctx context.Context, ts *db.ExplorationStore, g
 		body, err := c.compress(compressCtx, currentGraph, current, currentNodes)
 		cancel()
 		if err != nil {
-			if !errors.Is(err, errLineageSummaryIncomplete) {
-				return nil, err
-			}
-			body = deterministicLineageBody(current, currentNodes)
-			if body == "" {
-				return nil, err
-			}
-			log.Printf("[compaction] deterministic fallback exp=%d block=%v: %v", ts.ID(), current.Members, err)
+			return nil, err
 		}
 		fresh, freshNodes, err := loadColdGraph(ts)
 		if err != nil {
@@ -684,47 +677,6 @@ func digestTopicTitle(body string) string {
 	return title
 }
 
-func lineageExcerpt(text string, limit int) string {
-	text = strings.Join(strings.Fields(text), " ")
-	runes := []rune(text)
-	if len(runes) > limit {
-		return string(runes[:limit]) + "…"
-	}
-	return text
-}
-
-// deterministicLineageBody keeps a failed model block recoverable without
-// inventing conclusions: it only labels and excerpts the member source text.
-func deterministicLineageBody(b block, nodeByID map[int64]*db.Node) string {
-	var work, result string
-	for _, id := range b.Members {
-		n := nodeByID[id]
-		if n == nil {
-			continue
-		}
-		switch n.Kind {
-		case db.KindIntent:
-			if work == "" {
-				work = nodeSummary(n)
-			}
-		case db.KindFact, db.KindFinding:
-			if result == "" {
-				result = nodeSummary(n)
-			}
-		}
-	}
-	if work != "" && result != "" {
-		return "工作：" + lineageExcerpt(work, 80) + "。结果：" + lineageExcerpt(result, 110) + "。"
-	}
-	if result != "" {
-		return "观察：" + lineageExcerpt(result, 190) + "。"
-	}
-	if work != "" {
-		return "工作：" + lineageExcerpt(work, 190) + "。"
-	}
-	return ""
-}
-
 // digestPayload builds the digest node payload (cold-digest §1): the body, the
 // member ids split by kind (restore cache; source of truth is the covers edges),
 // the anchor ids, the generation, and the change-detection signature.
@@ -879,31 +831,46 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 }
 
 // compress runs the §4 body LLM call on one block. Uses the same model the agent
-// runs on; thinking disabled (a pure summarization step).
+// runs on; thinking disabled (a pure summarization step). Only truncated output
+// gets one shorter retry; provider failures and empty responses keep the block visible.
 func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByID map[int64]*db.Node) (string, error) {
-	req := llm.CompletionRequest{
-		System:    []string{compressionSystemPrompt},
-		Messages:  []llm.Message{llm.UserText(buildCompressionInput(g, b, nodeByID))},
-		MaxTokens: 600,
-		Thinking:  "disabled",
+	input := buildCompressionInput(g, b, nodeByID)
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		system := compressionSystemPrompt
+		if attempt == 1 {
+			system += compressionRetryPrompt
+			log.Printf("[compaction] retry shorter summary block=%v: %v", b.Members, lastErr)
+		}
+		req := llm.CompletionRequest{
+			System:    []string{system},
+			Messages:  []llm.Message{llm.UserText(input)},
+			MaxTokens: 600,
+			Thinking:  "disabled",
+		}
+		msg, stopReason, _, err := c.prov.Complete(ctx, req)
+		if err != nil {
+			return "", err
+		}
+		switch strings.ToLower(stopReason) {
+		case "max_tokens", "length":
+			lastErr = fmt.Errorf("%w: stop_reason=%s", errLineageSummaryIncomplete, stopReason)
+			continue
+		case "", "stop", "end_turn", "stop_sequence", "complete", "completed":
+		default:
+			return "", fmt.Errorf("invalid body completion: stop_reason=%s", stopReason)
+		}
+		body := strings.TrimSpace(msg.Text())
+		if body == "" {
+			return "", fmt.Errorf("empty body from model")
+		}
+		return body, nil
 	}
-	msg, stopReason, _, err := c.prov.Complete(ctx, req)
-	if err != nil {
-		return "", err
-	}
-	switch strings.ToLower(stopReason) {
-	case "max_tokens", "length":
-		return "", fmt.Errorf("%w: stop_reason=%s", errLineageSummaryIncomplete, stopReason)
-	case "", "stop", "end_turn", "stop_sequence", "complete", "completed":
-	default:
-		return "", fmt.Errorf("invalid body completion: stop_reason=%s", stopReason)
-	}
-	body := strings.TrimSpace(msg.Text())
-	if body == "" {
-		return "", fmt.Errorf("empty body from model")
-	}
-	return body, nil
+	return "", lastErr
 }
 
 // compressionSystemPrompt is the §4 body prompt.
 const compressionSystemPrompt = `把这组探索节点写成供 Planner 查重的导航摘要，不是证据文档。只输出 1–2 句、最多 220 字：先说做过什么，再说最关键的正向发现或未完成边界；没有正向发现就概括主要否定范围。最多引用 3 个代表来源 id。不要写覆盖数量，不要罗列接口、参数、响应字段、执行步骤或全部 Fact，这些信息由程序另行展示。observed 与 inferred 不得混淆，不得脑补。`
+
+const compressionRetryPrompt = `
+上一次输出达到长度上限。请直接给出完整的 1–2 句导航摘要，不解释、不复述过程、不逐条罗列成员；保留最关键的结论、限制或未完成边界及代表来源 id。`

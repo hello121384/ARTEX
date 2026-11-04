@@ -26,10 +26,10 @@ func TestDigestTitleFollowsBodyRatherThanUnrelatedAnchor(t *testing.T) {
 	}
 }
 
-func TestLineagePrepareBlockUsesSourceExcerptAfterTruncation(t *testing.T) {
+func TestLineagePrepareBlockRejectsRepeatedlyTruncatedSummary(t *testing.T) {
 	d := testDB(t)
 	defer d.Close()
-	task, err := d.CreateTask("lineage deterministic fallback", "lineage deterministic fallback", nil, 0, 0)
+	task, err := d.CreateTask("lineage rejects truncated summary", "lineage rejects truncated summary", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,23 +57,45 @@ func TestLineagePrepareBlockUsesSourceExcerptAfterTruncation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	calls := 0
 	c := NewCompactor(nil, "")
 	c.prov = captureUsageProvider{stream: func(_ context.Context, yield func(llm.StreamEvent, error) bool) {
+		calls++
 		yield(llm.StreamEvent{Type: llm.SETextDelta, Text: "incomplete model output"}, nil)
 		yield(llm.StreamEvent{Type: llm.SEMessageDelta, StopReason: "max_tokens"}, nil)
 	}}
 	b := block{Members: []int64{intent, fact}}
-	prepared, err := c.prepareBlock(context.Background(), store, g, b, nodes, versions, 1)
-	if err != nil {
-		t.Fatal(err)
+	if prepared, err := c.prepareBlock(context.Background(), store, g, b, nodes, versions, 1); err == nil || prepared != nil {
+		t.Fatalf("truncated summary was prepared: %+v, %v", prepared, err)
 	}
-	body := prepared.payload["body"].(string)
-	for _, want := range []string{"verify order authorization", "cross tenant order returned 15120"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("fallback body missing %q: %s", want, body)
+	if calls != 2 {
+		t.Fatalf("calls=%d want one retry", calls)
+	}
+	digests, err := store.ActiveDigests()
+	if err != nil || len(digests) != 0 {
+		t.Fatalf("failed compression hid source members: %+v, %v", digests, err)
+	}
+}
+
+func TestLineageCompressionRetriesTruncationWithShorterPrompt(t *testing.T) {
+	nodes := map[int64]*db.Node{
+		1: {ID: 1, Kind: db.KindFact, State: "confirmed", Payload: json.RawMessage(`{"summary":"one"}`)},
+		2: {ID: 2, Kind: db.KindFact, State: "confirmed", Payload: json.RawMessage(`{"summary":"two"}`)},
+	}
+	g := newColdGraph([]cgNode{{ID: 1, Kind: db.KindFact, State: "confirmed"}, {ID: 2, Kind: db.KindFact, State: "confirmed"}}, nil)
+	calls := 0
+	c := NewCompactor(nil, "")
+	c.prov = captureUsageProvider{stream: func(_ context.Context, yield func(llm.StreamEvent, error) bool) {
+		calls++
+		if calls == 1 {
+			yield(llm.StreamEvent{Type: llm.SETextDelta, Text: "incomplete"}, nil)
+			yield(llm.StreamEvent{Type: llm.SEMessageDelta, StopReason: "max_tokens"}, nil)
+			return
 		}
-	}
-	if len([]rune(body)) > 220 || prepared.payload["title"] != "工作：verify order authorization" {
-		t.Fatalf("fallback payload=%+v", prepared.payload)
+		yield(llm.StreamEvent{Type: llm.SETextDelta, Text: "short complete summary"}, nil)
+	}}
+	body, err := c.compress(context.Background(), g, block{Members: []int64{1, 2}}, nodes)
+	if err != nil || body != "short complete summary" || calls != 2 {
+		t.Fatalf("body=%q calls=%d err=%v", body, calls, err)
 	}
 }
