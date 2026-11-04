@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
@@ -88,10 +89,25 @@ func (t *ToolSet) searchHistory() actool.CoreTool {
 			if in.Limit > 50 {
 				in.Limit = 50
 			}
+			keyKinds := append([]string(nil), kinds...)
+			sort.Strings(keyKinds)
+			keyStates := make([]string, 0, len(in.States))
+			for _, state := range in.States {
+				keyStates = append(keyStates, strings.ToLower(strings.TrimSpace(state)))
+			}
+			sort.Strings(keyStates)
+			key, _ := json.Marshal(map[string]any{
+				"q": strings.TrimSpace(in.Q), "kinds": keyKinds, "states": keyStates,
+				"asset_id": in.AssetID, "limit": in.Limit, "before": in.Before,
+			})
+			if result, duplicate := t.reusePlannerHistoryRead("search_history", string(key)); duplicate {
+				return result, nil
+			}
 			nodes, hasMore, total, err := t.ts.NodesBeforeWithSources(db.NodeFilter{
 				Kinds: kinds, States: in.States, Query: strings.TrimSpace(in.Q), AssetID: in.AssetID,
 			}, in.Before, in.Limit)
 			if err != nil {
+				t.retryPlannerHistoryRead("search_history", string(key))
 				return actool.Errorf(err.Error()), nil
 			}
 			items := make([]map[string]any, 0, len(nodes))

@@ -195,13 +195,48 @@ func ovUncompressedCold(b *overviewWriter, data map[string]any) {
 	if total == "" || total == "0" {
 		return
 	}
+	displayed := map[string]bool{}
+	for _, key := range []string{"recent_facts", "recent_done_intents", "finding_list", "recent_findings", "recent_intent_results"} {
+		for _, row := range ovMaps(data[key]) {
+			displayed[ovText(row["id"], 24)] = true
+		}
+	}
 	rows := ovMaps(data["uncompressed_cold_nodes"])
+	filtered := make([]map[string]any, 0, len(rows))
+	duplicates := map[string]bool{}
+	for _, row := range rows {
+		id := ovText(row["id"], 24)
+		if displayed[id] {
+			duplicates[id] = true
+			continue
+		}
+		filtered = append(filtered, row)
+	}
+	var more []string
+	switch ids := data["uncompressed_cold_more"].(type) {
+	case []int64:
+		for _, id := range ids {
+			more = append(more, fmt.Sprint(id))
+		}
+	case []any:
+		for _, id := range ids {
+			more = append(more, fmt.Sprint(id))
+		}
+	}
+	uniqueMore := more[:0]
+	for _, id := range more {
+		if displayed[id] {
+			duplicates[id] = true
+			continue
+		}
+		uniqueMore = append(uniqueMore, id)
+	}
 	b.record()
-	fmt.Fprintf(b, "【未压缩冷节点】共%s条，当前列出%d条；这些节点未被 Digest 覆盖，可用 search_history 查重、node_detail(id) 读取原文。\n", total, len(rows))
-	ovRows(b, "未压缩冷节点目录", rows, "summary", 340, len(rows))
-	if ids := ovIDs(data["uncompressed_cold_more"]); ids != "" {
+	fmt.Fprintf(b, "【未压缩冷节点】共%s条，另列%d条，%d条已在近期窗口展示；这些节点未被 Digest 覆盖。目录只用于感知和按需定位，不要逐项展开；精确查重用 search_history，关键原文用 node_detail(id)。\n", total, len(filtered)+len(uniqueMore), len(duplicates))
+	ovRows(b, "未压缩冷节点目录", filtered, "summary", 340, len(filtered))
+	if len(uniqueMore) > 0 {
 		b.record()
-		fmt.Fprintf(b, "  其他未压缩冷节点 ID: %s；可用 search_history 或 node_detail(id) 回源。\n", ids)
+		fmt.Fprintf(b, "  其他未压缩冷节点 ID: %s；可用 search_history 或 node_detail(id) 回源。\n", strings.Join(uniqueMore, ","))
 	}
 }
 

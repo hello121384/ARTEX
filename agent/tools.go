@@ -106,7 +106,8 @@ type ToolSet struct {
 	// round is told the round was fired by a new hint and spells the hint out, instead of
 	// the planner having to spot it folded into the graph overview. Wired for the main
 	// agent + cross-task orchestration; nil elsewhere → falls back to the bare notify.
-	notifyHint func(texts []string)
+	notifyHint   func(texts []string)
+	historyReads historyReadState
 }
 
 // SetNotifyGoal wires the goal-add trigger callback (see ToolSet.notifyGoal). Set only
@@ -1034,14 +1035,20 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 			if id <= 0 {
 				return actool.Errorf("id 必填"), nil
 			}
+			if result, duplicate := t.reusePlannerHistoryRead("node_detail", strconv.FormatInt(id, 10)); duplicate {
+				return result, nil
+			}
 			n, err := t.ts.GetNodeWithSources(id)
 			if err != nil {
+				t.retryPlannerHistoryRead("node_detail", strconv.FormatInt(id, 10))
 				return actool.Errorf(err.Error()), nil
 			}
 			if n == nil {
+				t.retryPlannerHistoryRead("node_detail", strconv.FormatInt(id, 10))
 				return actool.Errorf(fmt.Sprintf("未找到探索节点 %d。若你想查的是资产，请用 list_assets / asset_neighbors（资产与探索节点是不同的 id 空间，资产 id 不能传给 node_detail）。", id)), nil
 			}
 			if err := t.ts.PopulateFindingTrafficIDs([]*db.Node{n}); err != nil {
+				t.retryPlannerHistoryRead("node_detail", strconv.FormatInt(id, 10))
 				return actool.Errorf(err.Error()), nil
 			}
 			return jsonResult(n) // full payload incl. detail / evidence, plus explicit finding IDs

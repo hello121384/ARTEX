@@ -317,13 +317,35 @@ func TestPlannerOverviewListsUncompressedColdNodes(t *testing.T) {
 		"uncompressed_cold_more": []int64{69},
 	})
 	for _, want := range []string{
-		"【未压缩冷节点】共3条，当前列出2条", "#71 [confirmed] old negative result remains discoverable kind=fact",
+		"【未压缩冷节点】共3条，另列3条，0条已在近期窗口展示", "#71 [confirmed] old negative result remains discoverable kind=fact",
 		"#70 [blocked] unfinished boundary kind=intent", "blocked_reason=fixture unavailable",
-		"其他未压缩冷节点 ID: 69", "search_history", "node_detail(id)",
+		"其他未压缩冷节点 ID: 69", "search_history", "node_detail(id)", "不要逐项展开",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("uncompressed cold directory missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestPlannerOverviewDeduplicatesUncompressedColdDirectory(t *testing.T) {
+	got := plannerOverviewText(map[string]any{
+		"recent_facts":            []map[string]any{{"id": int64(71), "state": "confirmed", "summary": "already shown fact"}},
+		"recent_done_intents":     []map[string]any{{"id": int64(70), "state": "done", "summary": "already shown intent"}},
+		"uncompressed_cold_total": 4,
+		"uncompressed_cold_nodes": []map[string]any{
+			{"id": int64(71), "kind": "fact", "state": "confirmed", "summary": "duplicate fact"},
+			{"id": int64(70), "kind": "intent", "state": "done", "summary": "duplicate intent"},
+			{"id": int64(69), "kind": "fact", "state": "confirmed", "summary": "directory only fact"},
+		},
+		"uncompressed_cold_more": []int64{71, 68},
+	})
+	for _, want := range []string{"【未压缩冷节点】共4条，另列2条，2条已在近期窗口展示", "#69 [confirmed] directory only fact", "其他未压缩冷节点 ID: 68"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("deduplicated cold directory missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "duplicate fact") || strings.Contains(got, "duplicate intent") {
+		t.Fatalf("cold directory repeated rows already shown above:\n%s", got)
 	}
 }
 

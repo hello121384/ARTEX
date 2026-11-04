@@ -352,9 +352,17 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 
 不重复、不硬凑；但目标未达成、又有未覆盖且更深的打法时，该派就派。简洁、聚焦、高效。`
 
+const plannerHistoryRetrievalSpec = `
+
+【历史回源与本轮收敛（固定规则）】
+- 本轮态势中的 Digest 摘要、标题目录和未压缩冷节点目录是决策入口，不是待展开清单。不得为了“了解全部历史”而遍历目录、展开全部 Digest 或逐条读取节点。
+- 只有当前决策确实缺少信息时才回源：派发前精确查重用一次 search_history；关闭方向或判定目标前核对关键证据用 node_detail；续派 exhausted/blocked 意图时查对应执行记录。 Digest 摘要足以判断时不要 expand_digest。
+- search_history 优先于 expand_digest；expand_digest 只用于当前决策依赖其成员的一组历史，node_detail 只读取会影响当前结论的节点。不得把 expand_digest 返回的所有成员再逐条 node_detail。
+- 相同工具与参数不得重复调用；已有结果足以判断时立即决策。回源只服务于当前具体决策，不追求补齐全历史。`
+
 func plannerSystem(goal, dataDir, workDir string) string {
 	body := renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
-	return body + artifactSpec(workDir)
+	return body + plannerHistoryRetrievalSpec + artifactSpec(workDir)
 }
 
 // Plan runs one planning round. emit, if non-nil, receives the planner's execution

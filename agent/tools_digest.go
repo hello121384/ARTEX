@@ -320,8 +320,12 @@ func (t *ToolSet) expandDigest() actool.CoreTool {
 				ID int64 `json:"id"`
 			}
 			_ = json.Unmarshal(raw, &in)
+			if result, duplicate := t.reusePlannerHistoryRead("expand_digest", fmt.Sprint(in.ID)); duplicate {
+				return result, nil
+			}
 			n, store, srcTaskID := t.resolveDigest(in.ID)
 			if n == nil {
+				t.retryPlannerHistoryRead("expand_digest", fmt.Sprint(in.ID))
 				return jsonResult(map[string]any{"error": fmt.Sprintf("#%d 不是 digest 节点（本任务或直接关联任务里都没找到）", in.ID)})
 			}
 			var p struct {
