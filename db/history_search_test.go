@@ -55,6 +55,73 @@ func TestNodesBeforeWithSourcesFiltersPagesAndKeepsTotal(t *testing.T) {
 	}
 }
 
+func TestNodesPageBooleanQuery(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+	expID, err := d.CreateExploration("history boolean query", "history boolean query")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = d.Exec(`DELETE FROM explorations WHERE id=$1`, expID) })
+	store := d.Exploration(expID)
+
+	alpha, err := store.AddNode(KindFact, map[string]any{"summary": "alpha prefix"}, 0, "confirmed", "omega-worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beta, err := store.AddNode(KindFact, map[string]any{"summary": "beta result"}, 0, "confirmed", "worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alphaOnly, err := store.AddNode(KindFact, map[string]any{"summary": "alpha without the other term"}, 0, "confirmed", "worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	literal, err := store.AddNode(KindFact, map[string]any{"summary": "literal alpha%_ marker"}, 0, "confirmed", "worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertQuery := func(query string, want ...int64) {
+		t.Helper()
+		nodes, total, err := store.NodesPage(NodeFilter{Kinds: []string{KindFact}, Query: query}, 1, 20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != len(want) || len(nodes) != len(want) {
+			t.Fatalf("query %q: total=%d nodes=%d, want %d", query, total, len(nodes), len(want))
+		}
+		got := map[int64]bool{}
+		for _, node := range nodes {
+			got[node.ID] = true
+		}
+		for _, id := range want {
+			if !got[id] {
+				t.Fatalf("query %q missed node %d: %+v", query, id, nodes)
+			}
+		}
+	}
+	assertQuery("alpha", alpha, alphaOnly, literal)
+	assertQuery("  alpha   omega  ", alpha)
+	assertQuery("beta OR alpha omega", beta, alpha)
+	assertQuery("beta OR alpha", beta, alpha, alphaOnly, literal)
+	assertQuery("alpha%_", literal)
+	assertQuery(fmt.Sprintf("#%d", beta), beta)
+	assertQuery("missing terms")
+
+	first, total, err := store.nodesPage(NodeFilter{Kinds: []string{KindFact}, Query: "beta OR alpha"}, 1, 2, 0)
+	if err != nil || total != 4 || len(first) != 2 {
+		t.Fatalf("boolean first page: total=%d nodes=%d err=%v", total, len(first), err)
+	}
+	second, total, err := store.nodesPage(NodeFilter{Kinds: []string{KindFact}, Query: "beta OR alpha"}, 1, 2, first[len(first)-1].ID)
+	if err != nil || total != 4 || len(second) != 2 {
+		t.Fatalf("boolean second page: total=%d nodes=%d err=%v", total, len(second), err)
+	}
+}
+
 func TestNodesPageAssetFilterIncludesCoveringDigest(t *testing.T) {
 	d, err := Open(testDSN(t))
 	if err != nil {

@@ -51,7 +51,7 @@ func (t *ToolSet) searchHistory() actool.CoreTool {
 	return t.readExpTool("search_history",
 		"按关键词、节点类型、状态或资产检索本任务及直接关联任务的完整历史，数据库侧过滤并分页，不受概览标题目录和最近节点窗口限制。默认查 intent/fact/digest；返回紧凑索引，Digest 用 expand_digest(id)，其他节点用 node_detail(id) 取完整证据。before 传上一页 next_before；total 始终是全部匹配数。",
 		obj(map[string]any{
-			"q":        str("关键词，匹配节点内容、来源或 #id；可选"),
+			"q":        str("关键词，匹配节点内容或来源；空格表示 AND，OR 表示或（如 'api 鉴权 OR 403 bypass'），#id 精确定位节点；可选"),
 			"kinds":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "节点类型：intent/fact/digest/finding/goal/hint/begin；默认 intent/fact/digest"},
 			"states":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "按状态过滤，如 done/blocked/exhausted/confirmed/active；可选"},
 			"asset_id": idp("资产 id；返回直接关联该资产的历史，以及覆盖相关成员的 Digest；可选"),

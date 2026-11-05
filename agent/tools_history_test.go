@@ -81,6 +81,36 @@ func TestSearchHistoryDefaultsToTenCompactEntries(t *testing.T) {
 	}
 }
 
+func TestSearchHistoryBooleanQuery(t *testing.T) {
+	d := testDB(t)
+	defer d.Close()
+	task, err := d.CreateTask("history boolean search", "history boolean search", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(task.ID) })
+	store := d.Exploration(task.ExplorationID)
+	for _, summary := range []string{
+		"api-gateway 返回 200 白名单页，路径检查完成",
+		"auth-service gateway closed",
+		"session-service gateway closed",
+	} {
+		if _, err := store.AddNode(db.KindFact, map[string]any{"summary": summary}, 0, "confirmed", "worker", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tools := NewToolSet(store, "planner")
+	andResult := callReadJSON(t, tools.searchHistory(), `{"q":"api-gateway 白名单 200","limit":5}`).(map[string]any)
+	if andResult["total"].(float64) != 1 || len(andResult["items"].([]any)) != 1 {
+		t.Fatalf("AND search=%+v", andResult)
+	}
+	orResult := callReadJSON(t, tools.searchHistory(), `{"q":"user-service OR auth-service OR session-service","limit":5}`).(map[string]any)
+	if orResult["total"].(float64) != 2 || len(orResult["items"].([]any)) != 2 {
+		t.Fatalf("OR search=%+v", orResult)
+	}
+}
+
 func TestCompactHistoryNodeUsesShortSentenceBoundary(t *testing.T) {
 	prefix := fmt.Sprintf("网关路径绕过测试已完成全部否定，%0120d。", 0)
 	payload := []byte(fmt.Sprintf(`{"summary":%q}`, prefix+fmt.Sprintf("后续字段%0200d", 0)))

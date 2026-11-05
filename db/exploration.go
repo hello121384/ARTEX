@@ -844,10 +844,62 @@ func (s *ExplorationStore) Nodes(limit int) ([]*Node, error) {
 type NodeFilter struct {
 	Kinds               []string // exploration_nodes.kind
 	States              []string // exploration_nodes.state
-	Query               string   // case-insensitive substring over payload text / origin
+	Query               string   // space-separated AND terms and OR groups over payload text / origin; #id also matches a node id
 	AssetID             int64    // directly anchored nodes, or digests covering an anchored member
 	TerminalIntentsOnly bool     // restrict intents to states safe to inherit from a source task
 	Asc                 bool     // true = oldest first (replay); default newest first (broadcast)
+}
+
+func historyNodeQuery(query string, args []any) (string, []any) {
+	q := strings.TrimSpace(query)
+	if q == "" {
+		return "", args
+	}
+	escapeLike := func(value string) string {
+		return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(value)
+	}
+	textCondition := func() string {
+		mark := "$" + fmt.Sprint(len(args))
+		return `(payload::text ILIKE ` + mark + ` ESCAPE '\' OR COALESCE(origin,'') ILIKE ` + mark + ` ESCAPE '\')`
+	}
+	if idStr := strings.TrimPrefix(q, "#"); idStr != "" {
+		if id, err := strconv.ParseInt(idStr, 10, 64); err == nil {
+			args = append(args, "%"+escapeLike(q)+"%")
+			condition := textCondition()
+			args = append(args, id)
+			return "(" + condition + " OR id = $" + fmt.Sprint(len(args)) + ")", args
+		}
+	}
+
+	var groups [][]string
+	var terms []string
+	for _, term := range strings.Fields(q) {
+		if strings.EqualFold(term, "OR") {
+			if len(terms) > 0 {
+				groups = append(groups, terms)
+				terms = nil
+			}
+			continue
+		}
+		terms = append(terms, term)
+	}
+	if len(terms) > 0 {
+		groups = append(groups, terms)
+	}
+	if len(groups) == 0 {
+		groups = [][]string{{q}}
+	}
+
+	groupConditions := make([]string, 0, len(groups))
+	for _, group := range groups {
+		termConditions := make([]string, 0, len(group))
+		for _, term := range group {
+			args = append(args, "%"+escapeLike(term)+"%")
+			termConditions = append(termConditions, textCondition())
+		}
+		groupConditions = append(groupConditions, "("+strings.Join(termConditions, " AND ")+")")
+	}
+	return "(" + strings.Join(groupConditions, " OR ") + ")", args
 }
 
 // NodesPage returns one 1-based page of this exploration's nodes plus the total
@@ -903,18 +955,9 @@ func (s *ExplorationStore) nodesPage(f NodeFilter, page, size int, before int64)
 			WHERE de.src_id=exploration_nodes.id AND de.rel='covers' AND ea.asset_id=`+mark+`
 		))`)
 	}
-	if q := strings.TrimSpace(f.Query); q != "" {
-		args = append(args, "%"+q+"%")
-		mark := "$" + fmt.Sprint(len(args))
-		ors := []string{"payload::text ILIKE " + mark, "COALESCE(origin,'') ILIKE " + mark}
-		// 纯数字(或 UI 里带 # 前缀的形式,如「#41」)当作节点 id 精确匹配,方便直接定位某个节点。
-		if idStr := strings.TrimPrefix(q, "#"); idStr != "" {
-			if id, err := strconv.ParseInt(idStr, 10, 64); err == nil {
-				args = append(args, id)
-				ors = append(ors, "id = $"+fmt.Sprint(len(args)))
-			}
-		}
-		conds = append(conds, "("+strings.Join(ors, " OR ")+")")
+	if condition, queryArgs := historyNodeQuery(f.Query, args); condition != "" {
+		conds = append(conds, condition)
+		args = queryArgs
 	}
 	where := " WHERE " + strings.Join(conds, " AND ")
 
