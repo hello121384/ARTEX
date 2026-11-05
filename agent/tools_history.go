@@ -29,8 +29,8 @@ func compactHistoryNode(n *db.Node) map[string]any {
 			}
 		}
 	}
-	if summary, ok := out["summary"].(string); ok && len([]rune(summary)) > 240 {
-		out["summary"] = string([]rune(summary)[:240]) + "…"
+	if summary, ok := out["summary"].(string); ok && len([]rune(summary)) > 160 {
+		out["summary"] = ovText(summary, 160)
 		out["summary_truncated"] = true
 	}
 	for _, key := range []string{"confidence", "conditions", "vulnclass", "severity"} {
@@ -55,7 +55,7 @@ func (t *ToolSet) searchHistory() actool.CoreTool {
 			"kinds":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "节点类型：intent/fact/digest/finding/goal/hint/begin；默认 intent/fact/digest"},
 			"states":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "按状态过滤，如 done/blocked/exhausted/confirmed/active；可选"},
 			"asset_id": idp("资产 id；返回直接关联该资产的历史，以及覆盖相关成员的 Digest；可选"),
-			"limit":    intp("返回条数，默认 20，上限 50"),
+			"limit":    intp("返回条数，默认 10，上限 50；精确查重建议 5，确需更多再翻页"),
 			"before":   intp("分页游标，传上一页 next_before；省略或 0 = 最新一页"),
 		}),
 		func(_ context.Context, raw json.RawMessage) (actool.Result, error) {
@@ -84,7 +84,7 @@ func (t *ToolSet) searchHistory() actool.CoreTool {
 				}
 			}
 			if in.Limit <= 0 {
-				in.Limit = 20
+				in.Limit = 10
 			}
 			if in.Limit > 50 {
 				in.Limit = 50

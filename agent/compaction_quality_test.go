@@ -84,18 +84,28 @@ func TestLineageCompressionRetriesTruncationWithShorterPrompt(t *testing.T) {
 	}
 	g := newColdGraph([]cgNode{{ID: 1, Kind: db.KindFact, State: "confirmed"}, {ID: 2, Kind: db.KindFact, State: "confirmed"}}, nil)
 	calls := 0
+	var budgets []int
 	c := NewCompactor(nil, "")
-	c.prov = captureUsageProvider{stream: func(_ context.Context, yield func(llm.StreamEvent, error) bool) {
-		calls++
-		if calls == 1 {
-			yield(llm.StreamEvent{Type: llm.SETextDelta, Text: "incomplete"}, nil)
-			yield(llm.StreamEvent{Type: llm.SEMessageDelta, StopReason: "max_tokens"}, nil)
-			return
-		}
-		yield(llm.StreamEvent{Type: llm.SETextDelta, Text: "short complete summary"}, nil)
-	}}
+	c.prov = captureUsageProvider{
+		request: func(req llm.CompletionRequest) { budgets = append(budgets, req.MaxTokens) },
+		stream: func(_ context.Context, yield func(llm.StreamEvent, error) bool) {
+			calls++
+			if calls == 1 {
+				yield(llm.StreamEvent{Type: llm.SETextDelta, Text: "incomplete"}, nil)
+				yield(llm.StreamEvent{Type: llm.SEMessageDelta, StopReason: "max_tokens"}, nil)
+				return
+			}
+			yield(llm.StreamEvent{Type: llm.SETextDelta, Text: "short complete summary"}, nil)
+		},
+	}
 	body, err := c.compress(context.Background(), g, block{Members: []int64{1, 2}}, nodes)
 	if err != nil || body != "short complete summary" || calls != 2 {
 		t.Fatalf("body=%q calls=%d err=%v", body, calls, err)
+	}
+	if len(budgets) != 2 || budgets[0] != 600 || budgets[1] != 900 {
+		t.Fatalf("retry budgets=%v", budgets)
+	}
+	if !strings.Contains(compressionSystemPrompt, "主题：结论") || !strings.Contains(compressionRetryPrompt, "主题：结论") {
+		t.Fatal("compression prompts do not require decision-oriented titles")
 	}
 }

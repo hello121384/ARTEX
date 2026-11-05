@@ -832,20 +832,22 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 
 // compress runs the §4 body LLM call on one block. Uses the same model the agent
 // runs on; thinking disabled (a pure summarization step). Only truncated output
-// gets one shorter retry; provider failures and empty responses keep the block visible.
+// gets one shorter retry with more output room; provider failures and empty responses keep the block visible.
 func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByID map[int64]*db.Node) (string, error) {
 	input := buildCompressionInput(g, b, nodeByID)
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		system := compressionSystemPrompt
+		maxTokens := 600
 		if attempt == 1 {
 			system += compressionRetryPrompt
+			maxTokens = 900
 			log.Printf("[compaction] retry shorter summary block=%v: %v", b.Members, lastErr)
 		}
 		req := llm.CompletionRequest{
 			System:    []string{system},
 			Messages:  []llm.Message{llm.UserText(input)},
-			MaxTokens: 600,
+			MaxTokens: maxTokens,
 			Thinking:  "disabled",
 		}
 		msg, stopReason, _, err := c.prov.Complete(ctx, req)
@@ -870,7 +872,7 @@ func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByI
 }
 
 // compressionSystemPrompt is the §4 body prompt.
-const compressionSystemPrompt = `把这组探索节点写成供 Planner 查重的导航摘要，不是证据文档。只输出 1–2 句、最多 220 字：先说做过什么，再说最关键的正向发现或未完成边界；没有正向发现就概括主要否定范围。最多引用 3 个代表来源 id。不要写覆盖数量，不要罗列接口、参数、响应字段、执行步骤或全部 Fact，这些信息由程序另行展示。observed 与 inferred 不得混淆，不得脑补。`
+const compressionSystemPrompt = `把这组探索节点写成供 Planner 查重的导航摘要，不是证据文档。只输出 1–2 句、最多 220 字。第一句必须是可直接放入目录的“主题：结论”标题，不超过 40 字，明确最关键的正向发现、否定范围或未完成边界，不要用“本组”“本轮”“已针对”等过程词开头。第二句补充最关键限制，并引用最多 3 个代表来源 id。不要写覆盖数量，不要罗列接口、参数、响应字段、执行步骤或全部 Fact，这些信息由程序另行展示。observed 与 inferred 不得混淆，不得脑补。`
 
 const compressionRetryPrompt = `
-上一次输出达到长度上限。请直接给出完整的 1–2 句导航摘要，不解释、不复述过程、不逐条罗列成员；保留最关键的结论、限制或未完成边界及代表来源 id。`
+上一次输出达到长度上限。请直接给出完整的 1–2 句导航摘要，第一句用“主题：结论”且不超过 40 字，不解释、不复述过程、不逐条罗列成员；保留最关键的结论、限制或未完成边界及代表来源 id。`

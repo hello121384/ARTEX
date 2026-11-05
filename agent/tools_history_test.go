@@ -55,3 +55,38 @@ func TestSearchHistoryFiltersAndPages(t *testing.T) {
 		t.Fatalf("bounded page=%+v", got)
 	}
 }
+
+func TestSearchHistoryDefaultsToTenCompactEntries(t *testing.T) {
+	d := testDB(t)
+	defer d.Close()
+	task, err := d.CreateTask("compact history search", "compact history search", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(task.ID) })
+	store := d.Exploration(task.ExplorationID)
+	for i := 0; i < 12; i++ {
+		if _, err := store.AddNode(db.KindFact, map[string]any{"summary": fmt.Sprintf("bounded history entry %d", i)}, 0, "confirmed", "worker", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tools := NewToolSet(store, "planner")
+	first := callReadJSON(t, tools.searchHistory(), `{"q":"bounded history"}`).(map[string]any)
+	if first["total"].(float64) != 12 || len(first["items"].([]any)) != 10 || !first["has_more"].(bool) || first["next_before"] == nil {
+		t.Fatalf("default page=%+v", first)
+	}
+	second := callReadJSON(t, tools.searchHistory(), fmt.Sprintf(`{"q":"bounded history","before":%v}`, first["next_before"])).(map[string]any)
+	if len(second["items"].([]any)) != 2 || second["has_more"].(bool) {
+		t.Fatalf("second page=%+v", second)
+	}
+}
+
+func TestCompactHistoryNodeUsesShortSentenceBoundary(t *testing.T) {
+	prefix := fmt.Sprintf("网关路径绕过测试已完成全部否定，%0120d。", 0)
+	payload := []byte(fmt.Sprintf(`{"summary":%q}`, prefix+fmt.Sprintf("后续字段%0200d", 0)))
+	node := &db.Node{Kind: db.KindFact, Payload: payload}
+	got := compactHistoryNode(node)
+	if got["summary"] != prefix+"…(截断)" || got["summary_truncated"] != true {
+		t.Fatalf("compact summary=%+v", got)
+	}
+}

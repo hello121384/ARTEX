@@ -57,7 +57,8 @@ func TestPlannerOverviewPreservesDigestDecisionFields(t *testing.T) {
 			"unresolved":  []map[string]any{{"intent_id": int64(9), "state": "blocked", "reason": "remaining tenant unavailable"}},
 			"source_refs": map[string][]int64{"intents": {8, 9}, "facts": {10, 11}, "findings": {12}},
 		}},
-		"cold_digests_more": []int64{43, 44},
+		"cold_digests_more":  []int64{43, 44},
+		"cold_digest_titles": []map[string]any{{"id": int64(42), "title": "current"}, {"id": int64(43), "title": "older"}, {"id": int64(44), "title": "oldest"}},
 	}
 	card := data["cold_digests"].([]map[string]any)[0]
 	results := card["key_results"].([]map[string]any)
@@ -74,7 +75,7 @@ func TestPlannerOverviewPreservesDigestDecisionFields(t *testing.T) {
 		"Fact #10 [confirmed/observed] tenant A order is readable",
 		"Fact #11 [confirmed/inferred] tenant C order was not readable",
 		"conditions=expired token only", "未完成: #9 [blocked] remaining tenant unavailable",
-		"关联发现: 12", "43,44", "graph_overview", "expand_digest(id)",
+		"关联发现: 12", "#43 older", "#44 oldest", "graph_overview", "expand_digest(id)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("lost %q in compact overview:\n%s", want, got)
@@ -96,12 +97,23 @@ func TestPlannerOverviewDigestBodyTruncationHasRecoveryPath(t *testing.T) {
 			{"id": int64(43), "body": "OLD BODY MUST SURVIVE", "member_count": 1},
 		},
 		"cold_digests_more": []int64{44, 45},
+		"cold_digest_titles": []map[string]any{
+			{"id": int64(42), "title": "current"}, {"id": int64(43), "title": "older"},
+			{"id": int64(44), "title": "overflow one"}, {"id": int64(45), "title": "overflow two"},
+		},
 	}
 	got := plannerOverviewText(data)
-	for _, want := range []string{"原始历史结论", "摘要已截断", "expand_digest(42)", "OLD BODY MUST SURVIVE", "44,45"} {
+	for _, want := range []string{"原始历史结论", "摘要已截断", "expand_digest(42)", "OLD BODY MUST SURVIVE", "#44 overflow one", "#45 overflow two"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing disclosure %q in:\n%s", want, got)
 		}
+	}
+}
+
+func TestOverviewTextTruncatesAtSentenceBoundary(t *testing.T) {
+	got := ovText("网关路径绕过测试已完成全部否定。后续字段不应出现在当前摘要中", 20)
+	if got != "网关路径绕过测试已完成全部否定。…(截断)" {
+		t.Fatalf("truncation cut through a sentence: %q", got)
 	}
 }
 
@@ -201,17 +213,23 @@ func TestPlannerOverviewRecoveryIDsSurviveLargeRecords(t *testing.T) {
 	for i := range results {
 		results[i] = map[string]any{"fact_id": i, "summary": strings.Repeat("事实", 400)}
 	}
+	titles := []map[string]any{{"id": 42, "title": "current"}, {"id": 43, "title": "older"}}
 	for _, data := range []map[string]any{
-		{"goals": goals, "cold_digests": []map[string]any{{"id": 42}, {"id": 43}}, "related_tasks": []map[string]any{{"cold_digests": []map[string]any{{"id": 44}}}}},
-		{"cold_digests": []map[string]any{{"id": 42, "key_results": results}, {"id": 43}}},
+		{
+			"goals": goals, "cold_digests": []map[string]any{{"id": 42}, {"id": 43}}, "cold_digest_titles": titles,
+			"related_tasks": []map[string]any{{
+				"cold_digests": []map[string]any{{"id": 44}}, "cold_digest_titles": []map[string]any{{"id": 44, "title": "related"}},
+			}},
+		},
+		{"cold_digests": []map[string]any{{"id": 42, "key_results": results}, {"id": 43}}, "cold_digest_titles": titles},
 	} {
 		got := plannerOverviewText(data)
-		for _, want := range []string{"Digest ID: 42,43", "expand_digest(id)"} {
+		for _, want := range []string{"#42 current", "#43 older", "expand_digest(id)"} {
 			if !strings.Contains(got, want) {
 				t.Fatalf("missing %q after truncation", want)
 			}
 		}
-		if data["related_tasks"] != nil && !strings.Contains(got, "42,43,44") {
+		if data["related_tasks"] != nil && !strings.Contains(got, "关联任务 Digest ID: 44") {
 			t.Fatal("missing related digest recovery ID")
 		}
 		if utf8.RuneCountInString(got) > plannerOverviewMaxRunes {

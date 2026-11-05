@@ -58,25 +58,27 @@ func plannerOverviewText(data map[string]any) string {
 		}
 	}
 
-	// Keep recovery IDs ahead of verbose records so global truncation cannot hide them.
-	var digestIDs []string
-	addIDs := func(digests []map[string]any, more any) {
-		for _, digest := range digests {
+	// The current task's title directory is its only ID catalog. Keep related-task
+	// IDs here because their detailed directories may be lost to global truncation.
+	digestTotal := len(ovMaps(data["cold_digest_titles"]))
+	var relatedDigestIDs []string
+	for _, source := range ovMaps(data["related_tasks"]) {
+		digestTotal += len(ovMaps(source["cold_digest_titles"]))
+		for _, digest := range ovMaps(source["cold_digests"]) {
 			if id := ovText(digest["id"], 24); id != "" {
-				digestIDs = append(digestIDs, id)
+				relatedDigestIDs = append(relatedDigestIDs, id)
 			}
 		}
-		if ids := ovIDs(more); ids != "" {
-			digestIDs = append(digestIDs, ids)
+		if ids := ovIDs(source["cold_digests_more"]); ids != "" {
+			relatedDigestIDs = append(relatedDigestIDs, ids)
 		}
 	}
-	addIDs(ovMaps(data["cold_digests"]), data["cold_digests_more"])
-	for _, source := range ovMaps(data["related_tasks"]) {
-		addIDs(ovMaps(source["cold_digests"]), source["cold_digests_more"])
-	}
-	if len(digestIDs) > 0 {
+	if digestTotal > 0 {
 		b.record()
-		fmt.Fprintf(&b, "【历史恢复入口】Digest ID: %s；使用 expand_digest(id) 查阅，完整 ID 列表见 graph_overview。\n", ovText(strings.Join(digestIDs, ","), 8000))
+		fmt.Fprintf(&b, "【历史恢复入口】共%d组；本任务完整 ID 与主题见下方历史标题目录，摘要与证据按需 expand_digest(id)。\n", digestTotal)
+		if len(relatedDigestIDs) > 0 {
+			fmt.Fprintf(&b, "关联任务 Digest ID: %s。\n", ovText(strings.Join(relatedDigestIDs, ","), 8000))
+		}
 	}
 	ovDigestTitles(&b, ovMaps(data["cold_digest_titles"]))
 
@@ -293,7 +295,7 @@ func ovDigests(b *overviewWriter, digests []map[string]any, more any, bodyBudget
 	}
 	if ids := ovIDs(more); ids != "" {
 		b.record()
-		fmt.Fprintf(b, "  其他未展示的 Digest ID: %s（expand_digest(id) 可找回）。\n", ids)
+		fmt.Fprintf(b, "  其余摘要未直接展示；完整 ID 见历史标题目录，按需 expand_digest(id) 找回。\n")
 	}
 }
 
@@ -417,10 +419,18 @@ func ovText(v any, limit int) string {
 	}
 	s := strings.Join(strings.Fields(fmt.Sprint(v)), " ")
 	r := []rune(s)
-	if len(r) > limit {
-		return string(r[:limit]) + "…(截断)"
+	if len(r) <= limit {
+		return s
 	}
-	return s
+	cut := limit
+	minimum := limit * 3 / 5
+	for i := limit - 1; i >= minimum; i-- {
+		if strings.ContainsRune("。！？!?；;", r[i]) || (r[i] == '.' && (i+1 == len(r) || r[i+1] == ' ')) {
+			cut = i + 1
+			break
+		}
+	}
+	return string(r[:cut]) + "…(截断)"
 }
 
 func ovIDs(v any) string {

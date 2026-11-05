@@ -12,7 +12,8 @@ import (
 )
 
 type captureUsageProvider struct {
-	stream func(context.Context, func(llm.StreamEvent, error) bool)
+	stream  func(context.Context, func(llm.StreamEvent, error) bool)
+	request func(llm.CompletionRequest)
 }
 
 func (p captureUsageProvider) Stream(ctx context.Context, _ llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
@@ -20,6 +21,9 @@ func (p captureUsageProvider) Stream(ctx context.Context, _ llm.CompletionReques
 }
 
 func (p captureUsageProvider) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	if p.request != nil {
+		p.request(req)
+	}
 	acc := llm.NewAccumulator()
 	for ev, err := range p.Stream(ctx, req) {
 		if err != nil {
