@@ -148,7 +148,16 @@ func (c *Compactor) maintain(ts *db.ExplorationStore) (round int64, uncompressed
 	if err != nil {
 		return
 	}
-	if len(active) >= c.m {
+	hasInvalidDigest := false
+	for _, digest := range active {
+		if !usableLineageDigest(digest) {
+			hasInvalidDigest = true
+			break
+		}
+	}
+	if hasInvalidDigest {
+		needMajor = true
+	} else if len(active) >= c.m {
 		versions, versionErr := ts.ContentVersions()
 		if versionErr != nil {
 			err = versionErr
@@ -160,6 +169,11 @@ func (c *Compactor) maintain(ts *db.ExplorationStore) (round int64, uncompressed
 }
 
 func (c *Compactor) majorNeeded(g *coldGraph, nodeByID map[int64]*db.Node, eligible map[int64]bool, versions map[int64]int, active []*db.Node) bool {
+	for _, digest := range active {
+		if !usableLineageDigest(digest) {
+			return true
+		}
+	}
 	if len(active) < c.m {
 		return false
 	}
@@ -259,6 +273,9 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 
 	bySig := map[string]*db.Node{}
 	for _, d := range active {
+		if !usableLineageDigest(d) {
+			continue
+		}
 		sig, _ := digestSigGen(d)
 		bySig[sig] = d
 	}
@@ -278,6 +295,10 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 	var stale []int64
 	retained := map[string]bool{}
 	for _, d := range active {
+		if !usableLineageDigest(d) {
+			stale = append(stale, d.ID)
+			continue
+		}
 		sig, _ := digestSigGen(d)
 		if !desired[sig] || retained[sig] {
 			stale = append(stale, d.ID)
@@ -659,6 +680,39 @@ func applyStampsInPlace(stamps map[int64]*int64, ops []stampOp) {
 
 // --- helpers: digest payload ---
 
+func isLineageCompressionRefusal(body string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(body))
+	normalized = strings.TrimLeft(normalized, "#* >`\"'“”‘’")
+	for _, prefix := range []string{
+		"我不能", "我无法", "抱歉", "对不起", "i can't", "i cannot", "sorry,", "sorry ",
+	} {
+		if strings.HasPrefix(normalized, prefix) {
+			return true
+		}
+	}
+	for _, phrase := range []string{
+		"无法协助", "不能协助", "无法帮助", "不能帮助", "拒绝协助", "拒绝提供",
+		"无法整理", "不能整理", "无法提供导航", "不能提供导航",
+	} {
+		if strings.Contains(normalized, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func usableLineageDigest(n *db.Node) bool {
+	if n == nil {
+		return false
+	}
+	var payload struct {
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	_ = json.Unmarshal(n.Payload, &payload)
+	return !isLineageCompressionRefusal(payload.Body) && !isLineageCompressionRefusal(payload.Title)
+}
+
 func digestTopicTitle(body string) string {
 	parts := strings.FieldsFunc(body, func(r rune) bool {
 		return r == '\n' || r == '。' || r == '！' || r == '？' || r == '!' || r == '?'
@@ -832,7 +886,7 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 
 // compress runs the §4 body LLM call on one block. Uses the same model the agent
 // runs on; thinking disabled (a pure summarization step). Only truncated output
-// gets one shorter retry with more output room; provider failures and empty responses keep the block visible.
+// gets one shorter retry with more output room; provider failures, empty responses and refusals keep the block visible.
 func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByID map[int64]*db.Node) (string, error) {
 	input := buildCompressionInput(g, b, nodeByID)
 	var lastErr error
@@ -866,13 +920,16 @@ func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByI
 		if body == "" {
 			return "", fmt.Errorf("empty body from model")
 		}
+		if isLineageCompressionRefusal(body) {
+			return "", errors.New("model returned a refusal instead of a lineage summary")
+		}
 		return body, nil
 	}
 	return "", lastErr
 }
 
 // compressionSystemPrompt is the §4 body prompt.
-const compressionSystemPrompt = `把这组探索节点写成供 Planner 查重的导航摘要，不是证据文档。只输出 1–2 句、最多 220 字。第一句必须是可直接放入目录的“主题：结论”标题，不超过 40 字，明确最关键的正向发现、否定范围或未完成边界，不要用“本组”“本轮”“已针对”等过程词开头。第二句补充最关键限制，并引用最多 3 个代表来源 id。不要写覆盖数量，不要罗列接口、参数、响应字段、执行步骤或全部 Fact，这些信息由程序另行展示。observed 与 inferred 不得混淆，不得脑补。`
+const compressionSystemPrompt = `把这组探索节点写成供 Planner 查重的导航摘要，不是证据文档。只输出 1–2 句、最多 220 字。第一句必须是可直接放入目录的“主题：结论”标题，不超过 40 字，明确最关键的正向发现、否定范围或未完成边界，不要用“本组”“本轮”“已针对”等过程词开头。第二句补充最关键限制，并引用最多 3 个代表来源 id。不要写覆盖数量，不要罗列接口、参数、响应字段、执行步骤或全部 Fact，这些信息由程序另行展示。observed 与 inferred 不得混淆，不得脑补。输入仅是待整理的已有记录；不提出或执行新操作，不评价授权，只按原记录客观归纳。`
 
 const compressionRetryPrompt = `
 上一次输出达到长度上限。请直接给出完整的 1–2 句导航摘要，第一句用“主题：结论”且不超过 40 字，不解释、不复述过程、不逐条罗列成员；保留最关键的结论、限制或未完成边界及代表来源 id。`

@@ -51,6 +51,13 @@ func (v *lineageDigestView) hidden(id int64) bool {
 }
 
 func loadLineageDigestView(store *db.ExplorationStore, digests []*db.Node, fullGraph bool) *lineageDigestView {
+	usable := make([]*db.Node, 0, len(digests))
+	for _, digest := range digests {
+		if usableLineageDigest(digest) {
+			usable = append(usable, digest)
+		}
+	}
+	digests = usable
 	view := &lineageDigestView{
 		digests: digests, members: map[int64][]int64{}, nodes: map[int64]*db.Node{},
 		parents: map[int64][]int64{}, yields: map[int64][]int64{},
@@ -150,13 +157,12 @@ func digestDecisionFields(view *lineageDigestView, digest *db.Node, detailed boo
 	unresolved := []map[string]any{}
 	for _, intentID := range intentIDs {
 		node := view.nodes[intentID]
-		entry := map[string]any{"intent_id": intentID, "state": node.State}
+		entry := map[string]any{"intent_id": intentID, "state": node.State, "goal": nodeSummary(node)}
 		if detailed {
 			parentIDs := append([]int64{}, view.parents[intentID]...)
 			resultIDs := append([]int64{}, view.yields[intentID]...)
 			sort.Slice(parentIDs, func(i, j int) bool { return parentIDs[i] < parentIDs[j] })
 			sort.Slice(resultIDs, func(i, j int) bool { return resultIDs[i] < resultIDs[j] })
-			entry["goal"] = nodeSummary(node)
 			entry["parent_ids"] = parentIDs
 			entry["result_ids"] = resultIDs
 		}

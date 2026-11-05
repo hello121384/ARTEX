@@ -30,15 +30,10 @@ func TestPlannerOverviewUsesThreeLayerHistory(t *testing.T) {
 	got := plannerOverviewText(data)
 	for _, want := range []string{
 		"【历史标题目录】共2组", "Older history remains visible", "【精选历史摘要】",
-		"navigation summary", "fact one", "fact three", "其余 Fact 2 条未展开", "expand_digest(42)",
+		"navigation summary", "fact one", "fact three", "fact four", "fact five", "Digest #42",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("three-layer overview missing %q:\n%s", want, got)
-		}
-	}
-	for _, unwanted := range []string{"fact four", "fact five"} {
-		if strings.Contains(got, unwanted) {
-			t.Fatalf("evidence should be deferred to expand_digest: %s", got)
 		}
 	}
 }
@@ -49,7 +44,10 @@ func TestPlannerOverviewPreservesDigestDecisionFields(t *testing.T) {
 		"frontier_open": 0, "done_intents_total": 2, "facts": 2, "findings_total": 1,
 		"cold_digests": []map[string]any{{
 			"id": int64(42), "member_count": 5, "body": "SOURCE DIGEST: confirmed and negative conclusions coexist",
-			"work": []map[string]any{{"intent_id": int64(8), "state": "done"}, {"intent_id": int64(9), "state": "blocked"}},
+			"work": []map[string]any{
+				{"intent_id": int64(8), "state": "done", "goal": "verify tenant A authorization"},
+				{"intent_id": int64(9), "state": "blocked", "goal": "verify remaining tenants"},
+			},
 			"key_results": []map[string]any{
 				{"fact_id": int64(10), "state": "confirmed", "confidence": "observed", "summary": "tenant A order is readable"},
 				{"fact_id": int64(11), "state": "confirmed", "confidence": "inferred", "summary": "tenant C order was not readable", "conditions": "expired token only"},
@@ -62,7 +60,7 @@ func TestPlannerOverviewPreservesDigestDecisionFields(t *testing.T) {
 	}
 	card := data["cold_digests"].([]map[string]any)[0]
 	results := card["key_results"].([]map[string]any)
-	for i := range 12 {
+	for i := range 40 {
 		results = append(results, map[string]any{
 			"fact_id": int64(20 + i), "state": "confirmed", "confidence": "observed",
 			"summary": "additional observed result with a persistent source identifier",
@@ -71,7 +69,8 @@ func TestPlannerOverviewPreservesDigestDecisionFields(t *testing.T) {
 	card["key_results"] = results
 	got := plannerOverviewText(data)
 	for _, want := range []string{
-		"SOURCE DIGEST: confirmed and negative", "#8/done", "#9/blocked",
+		"SOURCE DIGEST: confirmed and negative", "Intent #8 [done] verify tenant A authorization",
+		"Intent #9 [blocked] verify remaining tenants", "additional observed result with a persistent source identifier",
 		"Fact #10 [confirmed/observed] tenant A order is readable",
 		"Fact #11 [confirmed/inferred] tenant C order was not readable",
 		"conditions=expired token only", "未完成: #9 [blocked] remaining tenant unavailable",

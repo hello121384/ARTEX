@@ -291,7 +291,7 @@ func ovDigests(b *overviewWriter, digests []map[string]any, more any, bodyBudget
 			}
 		}
 		bodyBudget -= len(runes)
-		ovDigestDecisions(b, d, id)
+		ovDigestDecisions(b, d)
 	}
 	if ids := ovIDs(more); ids != "" {
 		b.record()
@@ -299,20 +299,13 @@ func ovDigests(b *overviewWriter, digests []map[string]any, more any, bodyBudget
 	}
 }
 
-func ovDigestDecisions(b *overviewWriter, digest map[string]any, digestID string) {
-	if work := ovMaps(digest["work"]); len(work) > 0 {
-		parts := make([]string, 0, len(work))
-		for _, item := range work {
-			parts = append(parts, fmt.Sprintf("#%s/%s", ovText(item["intent_id"], 24), ovText(item["state"], 20)))
-		}
-		fmt.Fprintf(b, "  工作状态: %s\n", strings.Join(parts, " "))
+func ovDigestDecisions(b *overviewWriter, digest map[string]any) {
+	for _, item := range ovMaps(digest["work"]) {
+		b.record()
+		fmt.Fprintf(b, "  - Intent #%s [%s] %s\n",
+			ovText(item["intent_id"], 24), ovText(item["state"], 20), ovText(item["goal"], 500))
 	}
-	results := ovMaps(digest["key_results"])
-	for i, result := range results {
-		if i >= 3 {
-			fmt.Fprintf(b, "  其余 Fact %d 条未展开；完整证据: expand_digest(%s)。\n", len(results)-i, digestID)
-			break
-		}
+	for _, result := range ovMaps(digest["key_results"]) {
 		b.record()
 		fmt.Fprintf(b, "  - Fact #%s [%s/%s] %s",
 			ovText(result["fact_id"], 24), ovText(result["state"], 20),

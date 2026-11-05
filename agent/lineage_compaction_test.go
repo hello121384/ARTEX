@@ -81,10 +81,44 @@ func TestLineageDigestCardKeepsDecisionFields(t *testing.T) {
 	}
 	rendered := plannerOverviewText(overview)
 	for _, want := range []string{
-		"简略正文", "tenant A order is readable by tenant B", "tenant C order was not readable",
+		"简略正文", "verify order authorization", "verify remaining tenants",
+		"tenant A order is readable by tenant B", "tenant C order was not readable",
 		"conditions=tested only with an expired token", "未完成:", "only two tenant fixtures were available",
 	} {
 		if !strings.Contains(rendered, want) {
+			t.Fatalf("compact Planner view lost %q:\n%s", want, rendered)
+		}
+	}
+}
+
+func TestLineageOverviewKeepsAllDigestDecisionCards(t *testing.T) {
+	d := testDB(t)
+	defer d.Close()
+	task, err := d.CreateTask("all digest decision cards", "all digest decision cards", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(task.ID) })
+	store := d.Exploration(task.ExplorationID)
+	for i := 0; i < 18; i++ {
+		fact, err := store.AddNode(db.KindFact, map[string]any{
+			"summary": fmt.Sprintf("covered decision %02d", i), "confidence": "observed",
+		}, 0, "confirmed", "worker", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.AddDigest(map[string]any{"body": fmt.Sprintf("navigation %02d", i)}, []int64{fact}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	overview := NewToolSet(store, "").graphOverviewData()
+	cards := overview["cold_digests"].([]map[string]any)
+	if len(cards) != 18 || overview["cold_digests_more"] != nil {
+		t.Fatalf("older decision cards were omitted: cards=%d more=%v", len(cards), overview["cold_digests_more"])
+	}
+	rendered := plannerOverviewText(overview)
+	for i := 0; i < 18; i++ {
+		if want := fmt.Sprintf("covered decision %02d", i); !strings.Contains(rendered, want) {
 			t.Fatalf("compact Planner view lost %q:\n%s", want, rendered)
 		}
 	}
@@ -449,6 +483,16 @@ func TestLineageMajorNeededOnlyWhenDesiredBlocksChange(t *testing.T) {
 	if c.majorNeeded(g, nodes, map[int64]bool{1: true, 2: true}, versions, active) {
 		t.Fatal("unchanged desired block should not trigger major")
 	}
+	invalidPayload := digestPayload("我不能整理这组已有历史记录。", b, nodes, 1, signature)
+	invalidRaw, err := json.Marshal(invalidPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.m = 2
+	if !c.majorNeeded(g, nodes, map[int64]bool{1: true, 2: true}, versions, []*db.Node{{ID: 12, Payload: invalidRaw}}) {
+		t.Fatal("refusal digest should trigger major even below the segment threshold")
+	}
+	c.m = 1
 	versions[2] = 2
 	if !c.majorNeeded(g, nodes, map[int64]bool{1: true, 2: true}, versions, active) {
 		t.Fatal("changed member version should trigger major")
@@ -491,6 +535,59 @@ func TestLineageMajorFailureKeepsPreviousDigest(t *testing.T) {
 	old, err := store.GetNode(oldID)
 	if err != nil || old.State != db.StateDigestSuperseded {
 		t.Fatalf("old digest state=%q err=%v", old.State, err)
+	}
+}
+
+func TestLineageDigestViewIgnoresRefusalDigest(t *testing.T) {
+	store, b, payload, _, _ := lineageCommitFixture(t, "lineage refusal digest view")
+	payload["body"] = "我不能整理这组已有历史记录。"
+	payload["title"] = "我不能整理这组已有历史记录"
+	digestID, err := store.AddDigest(payload, b.Members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hidden := hiddenMembersFor(store)
+	for _, id := range b.Members {
+		if hidden(id) {
+			t.Fatalf("refusal digest %d hid source member %d", digestID, id)
+		}
+	}
+	shown, more, titles := coldDigestsRecent(store, 10)
+	if len(shown) != 0 || len(more) != 0 || len(titles) != 0 {
+		t.Fatalf("refusal digest rendered: shown=%+v more=%v titles=%+v", shown, more, titles)
+	}
+}
+
+func TestLineageMajorReplacesRefusalDigest(t *testing.T) {
+	store, b, payload, _, _ := lineageCommitFixture(t, "lineage major replaces refusal")
+	if err := store.ApplyStampOps([]db.StampOp{{ID: b.Members[0], Set: true, Round: 0}, {ID: b.Members[1], Set: true, Round: 0}}); err != nil {
+		t.Fatal(err)
+	}
+	payload["body"] = "我不能整理这组已有历史记录。"
+	payload["title"] = "我不能整理这组已有历史记录"
+	payload["signature"] = "stale-refusal-digest"
+	oldID, err := store.AddDigest(payload, b.Members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewCompactor(nil, "")
+	c.params.R = 0
+	c.failureCooldown = 0
+	c.prov = captureUsageProvider{stream: func(_ context.Context, yield func(llm.StreamEvent, error) bool) {
+		yield(llm.StreamEvent{Type: llm.SETextDelta, Text: "历史验证：原有否定结论与限制已保留（#1）。"}, nil)
+	}}
+	c.m = 99
+	if _, _, needMajor, err := c.maintain(store); err != nil || !needMajor {
+		t.Fatalf("refusal digest did not trigger major: needMajor=%v err=%v", needMajor, err)
+	}
+	c.major(context.Background(), store)
+	active, err := store.ActiveDigests()
+	if err != nil || len(active) != 1 || active[0].ID == oldID {
+		t.Fatalf("refusal digest was not replaced: active=%+v err=%v", active, err)
+	}
+	old, err := store.GetNode(oldID)
+	if err != nil || old.State != db.StateDigestSuperseded {
+		t.Fatalf("old refusal digest state=%q err=%v", old.State, err)
 	}
 }
 

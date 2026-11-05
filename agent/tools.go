@@ -503,10 +503,10 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		recentDone = recentDone[:recentDoneCap]
 	}
 	out["recent_done_intents"] = compactIntents(recentDone, parentsOf, yieldsOf)
-	// cold-digest §6.1: 折叠冷区的 digest body，按最新成员时间降序取前 N；被截的更旧 digest
-	// 只给裸 id（仍可 expand_digest 展开），避免冷区唯一出口被无限拉长。
-	const coldDigestsCap = 15
-	if cds, more, titles := coldDigestsRecentView(digestView, coldDigestsCap); len(cds) > 0 {
+	// Every folded member needs a decision-grade replacement in the default view.
+	// The converter bounds presentation separately; hiding older cards here would
+	// hide both the original members and their only useful summary.
+	if cds, more, titles := coldDigestsRecentView(digestView, len(digestView.digests)); len(cds) > 0 {
 		out["cold_digests"] = cds
 		out["cold_digest_titles"] = titles
 		if len(more) > 0 {

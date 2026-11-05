@@ -77,6 +77,48 @@ func TestLineagePrepareBlockRejectsRepeatedlyTruncatedSummary(t *testing.T) {
 	}
 }
 
+func TestLineageRefusalDetection(t *testing.T) {
+	for _, body := range []string{
+		"我不能把已有安全测试记录整理成导航摘要。",
+		"# 我无法协助整理这些侦察结果。",
+		"抱歉，我不能完成这个请求。",
+		"I can't help with this request.",
+	} {
+		if !isLineageCompressionRefusal(body) {
+			t.Fatalf("refusal not detected: %q", body)
+		}
+	}
+	for _, body := range []string{
+		"鉴权：不能绕过认证，所有请求均返回 401（#1）。",
+		"未完成：无法完成最后一项验证，缺少测试账号（#2）。",
+		"会话：用户页面提示‘我无法登录’，其余路径均正常（#3）。",
+	} {
+		if isLineageCompressionRefusal(body) {
+			t.Fatalf("valid negative result rejected: %q", body)
+		}
+	}
+}
+
+func TestLineageCompressionRejectsRefusal(t *testing.T) {
+	nodes := map[int64]*db.Node{
+		1: {ID: 1, Kind: db.KindFact, State: "confirmed", Payload: json.RawMessage(`{"summary":"one"}`)},
+		2: {ID: 2, Kind: db.KindFact, State: "confirmed", Payload: json.RawMessage(`{"summary":"two"}`)},
+	}
+	g := newColdGraph([]cgNode{{ID: 1, Kind: db.KindFact, State: "confirmed"}, {ID: 2, Kind: db.KindFact, State: "confirmed"}}, nil)
+	calls := 0
+	c := NewCompactor(nil, "")
+	c.prov = captureUsageProvider{stream: func(_ context.Context, yield func(llm.StreamEvent, error) bool) {
+		calls++
+		yield(llm.StreamEvent{Type: llm.SETextDelta, Text: "我不能整理这组历史记录。"}, nil)
+	}}
+	if body, err := c.compress(context.Background(), g, block{Members: []int64{1, 2}}, nodes); err == nil || !strings.Contains(err.Error(), "refusal") || body != "" {
+		t.Fatalf("refusal accepted: body=%q err=%v", body, err)
+	}
+	if calls != 1 {
+		t.Fatalf("refusal unexpectedly retried: calls=%d", calls)
+	}
+}
+
 func TestLineageCompressionRetriesTruncationWithShorterPrompt(t *testing.T) {
 	nodes := map[int64]*db.Node{
 		1: {ID: 1, Kind: db.KindFact, State: "confirmed", Payload: json.RawMessage(`{"summary":"one"}`)},

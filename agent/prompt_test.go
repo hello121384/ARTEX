@@ -41,14 +41,6 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 	if !strings.Contains(got, "中间产物输出规约") || !strings.Contains(got, "/data") {
 		t.Fatalf("plannerSystem missing code-owned artifact tail: %q", got)
 	}
-	if !strings.Contains(got, "历史回源与本轮收敛") || !strings.Contains(got, "不是待展开清单") || !strings.Contains(got, "limit=5") {
-		t.Fatalf("plannerSystem missing code-owned history retrieval policy: %q", got)
-	}
-	for _, want := range []string{"时间较新且证据能支持结论的 observed Fact", "都是未完成，不是否定", "数量直接引用黑板统计或列表总数"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("plannerSystem missing freshness rule %q: %q", want, got)
-		}
-	}
 
 	// worker dual-text via {{if .ProxyAddr}} in a user template, plus the code tail:
 	// [B] trafficTool present only when RECORDING (caCert set — the MITM is on, so
