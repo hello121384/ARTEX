@@ -29,12 +29,18 @@ func TestPlannerOverviewUsesThreeLayerHistory(t *testing.T) {
 	}
 	got := plannerOverviewText(data)
 	for _, want := range []string{
-		"【历史标题目录】共2组", "Older history remains visible", "【精选历史摘要】",
+		"【历史标题目录】共2组", "Older history remains visible", "【历史摘要与决策】",
 		"navigation summary", "fact one", "fact three", "fact four", "fact five", "Digest #42",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("three-layer overview missing %q:\n%s", want, got)
 		}
+	}
+	if count := strings.Count(got, "UniAI authentication and SSRF"); count != 1 {
+		t.Fatalf("digest title rendered %d times, want once:\n%s", count, got)
+	}
+	if count := strings.Count(got, "成员=8"); count != 1 {
+		t.Fatalf("digest member count rendered %d times, want once:\n%s", count, got)
 	}
 }
 
@@ -89,10 +95,11 @@ func TestPlannerOverviewPreservesDigestDecisionFields(t *testing.T) {
 	}
 }
 
-func TestPlannerOverviewDigestBodyTruncationHasRecoveryPath(t *testing.T) {
+func TestPlannerOverviewPreservesCompleteDigestBodies(t *testing.T) {
+	body := strings.Repeat("原始历史结论", 500)
 	data := map[string]any{
 		"cold_digests": []map[string]any{
-			{"id": int64(42), "body": strings.Repeat("原始历史结论", 500), "member_count": 19},
+			{"id": int64(42), "body": body, "member_count": 19},
 			{"id": int64(43), "body": "OLD BODY MUST SURVIVE", "member_count": 1},
 		},
 		"cold_digests_more": []int64{44, 45},
@@ -102,9 +109,14 @@ func TestPlannerOverviewDigestBodyTruncationHasRecoveryPath(t *testing.T) {
 		},
 	}
 	got := plannerOverviewText(data)
-	for _, want := range []string{"原始历史结论", "摘要已截断", "expand_digest(42)", "OLD BODY MUST SURVIVE", "#44 overflow one", "#45 overflow two"} {
+	for _, want := range []string{body, "OLD BODY MUST SURVIVE", "#44 overflow one", "#45 overflow two"} {
 		if !strings.Contains(got, want) {
-			t.Errorf("missing disclosure %q in:\n%s", want, got)
+			t.Errorf("missing complete digest content %q in:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"摘要已截断", "预算已用尽"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("Planner digest body was truncated: %s", unwanted)
 		}
 	}
 }
@@ -132,21 +144,27 @@ func TestPlannerOverviewFormatsCoverageRatio(t *testing.T) {
 	}
 }
 
-func TestPlannerOverviewGlobalLimitKeepsRecoveryPath(t *testing.T) {
+func TestPlannerOverviewPreservesLargeRecords(t *testing.T) {
 	items := make([]map[string]any, 200)
 	for i := range items {
-		items[i] = map[string]any{"id": i, "state": "running", "summary": strings.Repeat("测试背景", 100)}
+		items[i] = map[string]any{"id": i, "state": "running", "summary": fmt.Sprintf("记录-%d", i) + strings.Repeat("测试背景", 100)}
 	}
+	goal := "keep original goals " + strings.Repeat("完整目标", 500)
 	got := plannerOverviewText(map[string]any{
-		"task":            map[string]any{"description": "test", "goal": "keep original goals"},
+		"task":            map[string]any{"description": "test", "goal": goal},
 		"running_intents": items,
 	})
-	if utf8.RuneCountInString(got) > plannerOverviewMaxRunes || !utf8.ValidString(got) {
-		t.Fatalf("invalid capped view: runes=%d", utf8.RuneCountInString(got))
+	if !utf8.ValidString(got) {
+		t.Fatal("invalid UTF-8 in Planner overview")
 	}
-	for _, want := range []string{"本节已截断", "graph_overview", "expand_digest(id)", "keep original goals"} {
+	for _, want := range []string{"graph_overview", "expand_digest(id)", goal, items[199]["summary"].(string)} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("missing %q after global limit", want)
+			t.Fatalf("complete large overview is missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{"本节已截断", "【全局视图截断】"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("Planner overview still contains truncation marker %q", unwanted)
 		}
 	}
 }
@@ -162,10 +180,10 @@ func TestPlannerOverviewPreservesHintTrafficRefs(t *testing.T) {
 	}
 }
 
-func TestPlannerOverviewTruncationKeepsCriticalHistoryAndRecovery(t *testing.T) {
+func TestPlannerOverviewLargeViewKeepsCriticalAndRelatedHistory(t *testing.T) {
 	completed := make([]map[string]any, 200)
 	for i := range completed {
-		completed[i] = map[string]any{"id": i, "state": "done", "summary": strings.Repeat("次要完成历史", 100)}
+		completed[i] = map[string]any{"id": i, "state": "done", "summary": fmt.Sprintf("次要完成历史-%d", i) + strings.Repeat("内容", 100)}
 	}
 	related := make([]map[string]any, 20)
 	for i := range related {
@@ -174,7 +192,7 @@ func TestPlannerOverviewTruncationKeepsCriticalHistoryAndRecovery(t *testing.T) 
 			digests[j] = map[string]any{"id": int64(1000 + j), "body": strings.Repeat("关联历史", 250), "member_count": 2}
 		}
 		related[i] = map[string]any{
-			"source_task_id": int64(12 + i), "task": map[string]any{"description": "secondary related history"},
+			"source_task_id": int64(12 + i), "task": map[string]any{"description": fmt.Sprintf("secondary related history %d", i)},
 			"cold_digests": digests,
 		}
 	}
@@ -192,11 +210,15 @@ func TestPlannerOverviewTruncationKeepsCriticalHistoryAndRecovery(t *testing.T) 
 	})
 	for _, want := range []string{
 		"critical goal", "critical hint", "critical running work", "CRITICAL DIGEST HISTORY",
-		"critical unresolved boundary", "【全局视图截断】", "graph_overview", "expand_digest(id)",
+		"critical unresolved boundary", "graph_overview", "expand_digest(id)",
+		completed[199]["summary"].(string), "secondary related history 19",
 	} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("critical content %q missing after truncation:\n%s", want, got)
+			t.Fatalf("critical content %q missing from complete overview", want)
 		}
+	}
+	if strings.Contains(got, "【全局视图截断】") {
+		t.Fatal("large Planner overview was globally truncated")
 	}
 	if strings.Index(got, "CRITICAL DIGEST HISTORY") > strings.Index(got, "近期完成/中断") {
 		t.Fatal("secondary completed history was emitted before critical digest history")
@@ -206,11 +228,11 @@ func TestPlannerOverviewTruncationKeepsCriticalHistoryAndRecovery(t *testing.T) 
 func TestPlannerOverviewRecoveryIDsSurviveLargeRecords(t *testing.T) {
 	goals := make([]map[string]any, 100)
 	for i := range goals {
-		goals[i] = map[string]any{"id": i, "text": strings.Repeat("目", 600)}
+		goals[i] = map[string]any{"id": i, "text": fmt.Sprintf("目标-%d", i) + strings.Repeat("目", 600)}
 	}
 	results := make([]map[string]any, 200)
 	for i := range results {
-		results[i] = map[string]any{"fact_id": i, "summary": strings.Repeat("事实", 400)}
+		results[i] = map[string]any{"fact_id": i, "summary": fmt.Sprintf("事实-%d", i) + strings.Repeat("内容", 400)}
 	}
 	titles := []map[string]any{{"id": 42, "title": "current"}, {"id": 43, "title": "older"}}
 	for _, data := range []map[string]any{
@@ -225,38 +247,41 @@ func TestPlannerOverviewRecoveryIDsSurviveLargeRecords(t *testing.T) {
 		got := plannerOverviewText(data)
 		for _, want := range []string{"#42 current", "#43 older", "expand_digest(id)"} {
 			if !strings.Contains(got, want) {
-				t.Fatalf("missing %q after truncation", want)
+				t.Fatalf("missing %q in complete overview", want)
 			}
 		}
-		if data["related_tasks"] != nil && !strings.Contains(got, "关联任务 Digest ID: 44") {
+		if data["related_tasks"] != nil && !strings.Contains(got, "【关联任务历史恢复入口】Digest ID: 44") {
 			t.Fatal("missing related digest recovery ID")
 		}
-		if utf8.RuneCountInString(got) > plannerOverviewMaxRunes {
-			t.Fatal("overview exceeds limit")
+		if data["goals"] != nil && !strings.Contains(got, goals[99]["text"].(string)) {
+			t.Fatal("last long goal was truncated")
+		}
+		if data["goals"] == nil && !strings.Contains(got, results[199]["summary"].(string)) {
+			t.Fatal("last long Fact was truncated")
 		}
 	}
 }
 
-func TestPlannerOverviewReservesRunningAndHints(t *testing.T) {
+func TestPlannerOverviewPreservesRunningAndHints(t *testing.T) {
 	goals := make([]map[string]any, 100)
 	for i := range goals {
 		goals[i] = map[string]any{"id": i, "text": strings.Repeat("目", 600)}
 	}
 	running := make([]map[string]any, 300)
 	for i := range running {
-		running[i] = map[string]any{"id": i, "state": "running", "summary": strings.Repeat("工", 340)}
+		running[i] = map[string]any{"id": i, "state": "running", "summary": fmt.Sprintf("运行-%d", i) + strings.Repeat("工", 340)}
 	}
 	got := plannerOverviewText(map[string]any{
 		"goals": goals, "running_intents": running, "running_intents_total": 300,
 		"hints": []map[string]any{{"id": 900, "text": "must preserve hint"}},
 	})
-	for _, want := range []string{"running_intents_total=300", "hints=1", "执行中 running_intents", "must preserve hint", "本节已截断", "graph_overview"} {
+	for _, want := range []string{"running_intents_total=300", "hints=1", "执行中 running_intents", "must preserve hint", "graph_overview", running[299]["summary"].(string)} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("missing %q after truncation", want)
+			t.Fatalf("missing %q in complete overview", want)
 		}
 	}
-	if utf8.RuneCountInString(got) > plannerOverviewMaxRunes {
-		t.Fatal("overview exceeds limit")
+	if strings.Contains(got, "本节已截断") {
+		t.Fatal("running or hint section was truncated")
 	}
 }
 
@@ -336,7 +361,7 @@ func TestPlannerOverviewListsUncompressedColdNodes(t *testing.T) {
 	for _, want := range []string{
 		"【未压缩冷节点】共3条，另列3条，0条已在近期窗口展示", "#71 [confirmed] old negative result remains discoverable kind=fact",
 		"#70 [blocked] unfinished boundary kind=intent", "blocked_reason=fixture unavailable",
-		"其他未压缩冷节点 ID: 69", "search_history", "node_detail(id)", "不要逐项展开",
+		"其他未压缩冷节点 ID: 69", "search_history", "node_detail(id)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("uncompressed cold directory missing %q:\n%s", want, got)
