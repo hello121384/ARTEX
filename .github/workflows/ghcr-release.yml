@@ -1,0 +1,127 @@
+name: publish-ghcr-docker
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag, e.g. v0.4.5"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ghcr-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-smoke-publish:
+    name: Build, smoke-test and publish Linux AMD64
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: artex
+          POSTGRES_PASSWORD: artex-ghcr-smoke-test
+          POSTGRES_DB: artex
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U artex -d artex"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 25
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      IMAGE: ghcr.io/hello121384/artex
+    steps:
+      - name: Check version tag
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Expected vX.Y.Z release tag, got $RELEASE_TAG" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - name: Show pinned build commit
+        run: git log -1 --format='%H %s'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build frontend
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build:static
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build embedded Linux AMD64 executable
+        run: |
+          mkdir -p server/webui/dist dist/amd64
+          cp -a web/out/. server/webui/dist/
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -tags embedui -trimpath \
+            -ldflags "-s -w -buildid= -X main.version=${RELEASE_TAG#v}" \
+            -o dist/amd64/artex ./cmd/artex
+          chmod +x dist/amd64/artex
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build candidate image locally
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ env.IMAGE }}:${{ env.RELEASE_TAG }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.RELEASE_TAG }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=ghcr-amd64
+          cache-to: type=gha,mode=max,scope=ghcr-amd64
+      - name: Smoke-test database, UI, and binary
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /app/artex "$IMAGE:$RELEASE_TAG" -h
+          docker run --detach --name artex-ghcr-smoke \
+            --network host \
+            -e ARTEX_PG_DSN='postgres://artex:artex-ghcr-smoke-test@127.0.0.1:5432/artex?sslmode=disable' \
+            "$IMAGE:$RELEASE_TAG"
+          trap 'docker logs --tail 80 artex-ghcr-smoke; docker rm -f artex-ghcr-smoke >/dev/null 2>&1 || true' EXIT
+          ready=0
+          for n in $(seq 1 45); do
+            if curl --fail --silent --show-error --max-time 3 \
+              http://127.0.0.1:8787/api/health >/tmp/artex-health.json 2>/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          test "$ready" = "1"
+          jq -e '.ok == true' /tmp/artex-health.json
+          curl --fail --silent --show-error \
+            http://127.0.0.1:8787/ >/tmp/artex-index.html
+          grep -qi '<!doctype html' /tmp/artex-index.html
+      - name: Publish tested image to GitHub Container Registry
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE:$RELEASE_TAG"
+          docker image inspect "$IMAGE:$RELEASE_TAG" --format '{{.Id}}'

@@ -107,6 +107,12 @@ Demo 只运行 `web/` 前端，构建时启用 `NEXT_PUBLIC_MOCK=1`，不需要 
 
 ---
 
+## 个人实验版 v0.4.5（Planner / Worker 改造）
+
+本仓库个人分支的跨服务器测试部署方法见 [DEPLOY-V045.md](DEPLOY-V045.md)，其 Docker 镜像使用 GitHub Container Registry，**不是**上游的 ruoji6/artex:latest。
+
+---
+
 ## 安装
 
 > 依赖数据库 **PostgreSQL**；探索需配置 **LLM**（`ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`，也可在 UI 里配）。

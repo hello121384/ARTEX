@@ -152,5 +152,5 @@ jobs:
             dist/SHA256SUMS
           generate_release_notes: true
           body: |
-            本 Release 由 binary-release 工作流从固定提交构建，仅包含程序包，不发布 Docker 镜像。
+            本 Release 由 binary-release 工作流构建五个平台程序包。Docker 镜像由 publish-ghcr-docker 工作流另行验收并发布到 ghcr.io/hello121384/artex。
             提供 Linux、macOS 的 AMD64 / ARM64 及 Windows AMD64，并附 SHA256SUMS。

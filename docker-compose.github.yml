@@ -1,0 +1,5 @@
+# Personal experimental build pinned to the v0.4.5 release.
+# Apply on top of docker-compose.yml on a fresh server.
+services:
+  artex:
+    image: ghcr.io/hello121384/artex:v0.4.5
