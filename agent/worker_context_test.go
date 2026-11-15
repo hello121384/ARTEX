@@ -59,7 +59,7 @@ func TestRenderWorkerTaskContextKeepsOnlyRelevantHistory(t *testing.T) {
 	got := renderWorkerTaskContext(data, intent)
 	for _, want := range []string{
 		longHint, `"traffic_refs":[77]`, "source task hint", `"source_task_id":855`,
-		"same asset history", "direct parent fact", "current result", "same asset fact",
+		"whole task must not be injected", "unrelated global goal", "same asset history", "direct parent fact", "current result", "same asset fact",
 		"same asset finding", "relevant digest body", "source ref relevant digest", "inherited same asset", "inherited relevant fact",
 		"205", "node_detail(id)", "list_facts", "expand_digest(id)",
 	} {
@@ -68,7 +68,7 @@ func TestRenderWorkerTaskContextKeepsOnlyRelevantHistory(t *testing.T) {
 		}
 	}
 	for _, unwanted := range []string{
-		"whole task must not be injected", "unrelated global goal", "host_count",
+		"host_count",
 		"unrelated running", "unrelated done", "unrelated fact", "other unrelated fact",
 		"unrelated finding", "unrelated digest body", "source ref unrelated digest", "inherited unrelated fact",
 	} {
@@ -108,7 +108,7 @@ func TestWorkerToolsRetainHistoryRecovery(t *testing.T) {
 	for _, tool := range toolSet.workerHistoryTools() {
 		found[tool.Name()] = true
 	}
-	for _, name := range []string{"list_facts", "expand_digest"} {
+	for _, name := range []string{"list_facts", "search_history", "expand_digest"} {
 		if !found[name] {
 			t.Errorf("compact-context recovery tool %s is missing", name)
 		}

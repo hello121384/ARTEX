@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -397,12 +398,22 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// The run-wide intent is not the current tool action. Do not forward it or
 	// inherit a parent run's background into the action reviewer.
 	ctx = intercept.WithReviewContext(ctx, runDir, intercept.ReviewBackground{})
-	overviewData := tsx.graphOverviewData()
 	overview := ""
 	if w.compactContext() {
-		overview = renderWorkerTaskContext(overviewData, intent)
+		// Query relevant historical nodes first; do not materialize and then cut
+		// down the entire task graph for every Worker start.
+		scoped, err := tsx.workerContextData(intent)
+		if err == nil {
+			overview = renderWorkerTaskContext(scoped, intent)
+		}
+		// Never silently lose history on a failed scoped read or an anchorless
+		// intent: retain the original complete graph as a safe fallback.
+		if err != nil || overview == "" {
+			log.Printf("[worker-context] task=%d intent=%d scoped read unavailable (%v); falling back to full overview", taskID, intent.ID, err)
+			overview = renderWorkerGraphOverview(tsx.graphOverviewData())
+		}
 	} else {
-		overview = renderWorkerGraphOverview(overviewData)
+		overview = renderWorkerGraphOverview(tsx.graphOverviewData())
 	}
 	proxyAddr := w.proxyAddr
 	if w.proxyAddrFn != nil {

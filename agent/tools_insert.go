@@ -670,7 +670,9 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 }
 
 func (t *ToolSet) workerHistoryTools() []actool.CoreTool {
-	return []actool.CoreTool{t.listFacts(), t.expandDigest()}
+	// Asset-scoped startup history is only a candidate window. The Worker must
+	// be able to find older relevant records and follow evidence by ID.
+	return []actool.CoreTool{t.listFacts(), t.searchHistory(), t.expandDigest()}
 }
 
 // MainAgentTools returns the human-interface tool set.

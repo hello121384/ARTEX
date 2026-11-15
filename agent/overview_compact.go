@@ -24,7 +24,28 @@ type overviewWriter struct {
 	strings.Builder
 }
 
+// plannerOverviewText preserves the existing detailed rendering for small graphs,
+// but switches to a bounded priority view when history would flood every wake-up.
+// All original records remain available through graph_overview/search_history.
 func plannerOverviewText(data map[string]any) string {
+	// Avoid even constructing an oversized full text when obvious large-graph
+	// signals already warrant the bounded/index view.
+	if len(ovMaps(data["goals"])) > 40 ||
+		len(ovMaps(data["running_intents"])) > 80 ||
+		len(ovMaps(data["recent_done_intents"])) > 60 ||
+		len(ovMaps(data["cold_digests"])) > 32 ||
+		len(ovMaps(data["related_tasks"])) > 6 ||
+		workerContextManyIDs(data["uncompressed_cold_more"], 120) {
+		return plannerOverviewBrief(data)
+	}
+	full := plannerOverviewTextUnbounded(data)
+	if len([]rune(full)) <= plannerOverviewRuneBudget {
+		return full
+	}
+	return plannerOverviewBrief(data)
+}
+
+func plannerOverviewTextUnbounded(data map[string]any) string {
 	if len(data) == 0 {
 		return ""
 	}

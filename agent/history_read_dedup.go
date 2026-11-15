@@ -9,6 +9,7 @@ import (
 type historyReadState struct {
 	mu      sync.Mutex
 	seen    map[string]struct{}
+	cache   map[string]actool.Result
 	calls   int
 	repeats int
 }
@@ -31,16 +32,28 @@ func (t *ToolSet) reusePlannerHistoryRead(name, key string) (actool.Result, bool
 		state.seen = map[string]struct{}{}
 	}
 	key = name + ":" + key
-	if _, ok := state.seen[key]; ok {
+	if cached, ok := state.cache[key]; ok {
 		state.repeats++
-		result, _ := jsonResult(map[string]any{
-			"duplicate": true,
-			"message":   "本轮已请求过相同内容；直接使用该工具上次的返回，不要重复回源。",
-		})
-		return result, true
+		return cached, true
 	}
+	// Another call may still be in progress. Never return a synthetic
+	// "duplicate" instead of evidence that the caller may no longer have.
 	state.seen[key] = struct{}{}
 	return actool.Result{}, false
+}
+
+// rememberPlannerHistoryRead caches the actual evidence/result, not just a
+// "you already read it" placeholder that can cause context loss.
+func (t *ToolSet) rememberPlannerHistoryRead(name, key string, result actool.Result) {
+	if t.worker != "planner" {
+		return
+	}
+	t.historyReads.mu.Lock()
+	if t.historyReads.cache == nil {
+		t.historyReads.cache = map[string]actool.Result{}
+	}
+	t.historyReads.cache[name+":"+key] = result
+	t.historyReads.mu.Unlock()
 }
 
 func (t *ToolSet) retryPlannerHistoryRead(name, key string) {
@@ -49,6 +62,7 @@ func (t *ToolSet) retryPlannerHistoryRead(name, key string) {
 	}
 	t.historyReads.mu.Lock()
 	delete(t.historyReads.seen, name+":"+key)
+	delete(t.historyReads.cache, name+":"+key)
 	t.historyReads.mu.Unlock()
 }
 

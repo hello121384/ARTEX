@@ -388,7 +388,13 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// derived_from — possibly several facts combined) and its yields (the
 	// facts/findings it produced). factFrom maps a fact → the intent that
 	// produced it. This is the relationship layer the flat lists lacked.
-	edges, _ := t.ts.Edges(5000)
+	// Reuse the complete cold-graph edge snapshot; avoid unordered LIMIT 5000.
+	ads, _ := t.ts.ActiveDigests()
+	digestView := loadLineageDigestView(t.ts, ads, true)
+	edges := digestView.edges
+	if edges == nil {
+		edges, _ = t.ts.Edges(1 << 30) // fallback when the cold graph could not load
+	}
 	parentsOf := map[int64][]int64{}
 	yieldsOf := map[int64][]int64{}
 	factFrom := map[int64]int64{}
@@ -401,10 +407,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 			factFrom[e.To] = e.From
 		}
 	}
-	// cold-digest §6: one shared graph snapshot drives both member revival and
-	// digest cards, avoiding a second full-graph read in the same overview.
-	ads, _ := t.ts.ActiveDigests()
-	digestView := loadLineageDigestView(t.ts, ads, true)
+	// cold-digest §6: the shared graph snapshot also drives member revival.
 	hidden := digestView.hidden
 	const openIntentsCap = 30
 	fr, _ := t.ts.Frontier(openIntentsCap) // priority DESC, id ASC —— 优先级最高的前 N 条；真实总数见 frontier_open
@@ -700,7 +703,10 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		}
 		stats, statsErr := ts.Stats()
 
-		edges, _ := ts.Edges(5000)
+		edges := digestView.edges
+		if edges == nil {
+			edges, _ = ts.Edges(1 << 30)
+		}
 		parentsOf := map[int64][]int64{}
 		yieldsOf := map[int64][]int64{}
 		factFrom := map[int64]int64{}
@@ -1050,7 +1056,11 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 				t.retryPlannerHistoryRead("node_detail", strconv.FormatInt(id, 10))
 				return actool.Errorf(err.Error()), nil
 			}
-			return jsonResult(n) // full payload incl. detail / evidence, plus explicit finding IDs
+			result, err := jsonResult(n) // full payload incl. detail / evidence, plus explicit finding IDs
+			if err == nil {
+				t.rememberPlannerHistoryRead("node_detail", strconv.FormatInt(id, 10), result)
+			}
+			return result, err
 		})
 }
 

@@ -32,6 +32,9 @@ func renderWorkerTaskContext(data map[string]any, intent *db.Node) string {
 
 	var b overviewWriter
 	b.WriteString("【本意图相关上下文（只读）】\n仅包含当前 Intent、同资产或直接血缘相关的历史，用于避免重复和衔接证据；不要扩大执行范围。\n")
+	if task, ok := data["task"].(map[string]any); ok {
+		fmt.Fprintf(&b, "【任务边界】%s\n目标: %s\n", ovText(task["description"], 500), ovText(task["goal"], 800))
+	}
 	if hints := workerContextHints(data); len(hints) > 0 {
 		if encoded, err := json.Marshal(hints); err == nil {
 			fmt.Fprintf(&b, "【有效人工提示（完整保留）】%s\n", encoded)
@@ -50,6 +53,14 @@ func renderWorkerTaskContext(data map[string]any, intent *db.Node) string {
 		digests = digests[:workerContextDigestCap]
 	}
 	ovDigests(&b, digests, moreDigests, 4000, 1000)
+	if len(moreDigests) > 0 {
+		show := moreDigests
+		if len(show) > 24 {
+			show = show[:24]
+		}
+		fmt.Fprintf(&b, "【更多关联 Digest】另有%d段，前%d个 ID: %s；完整历史用 search_history(kinds=[digest]) 检索并通过 expand_digest(id) 展开。\n",
+			len(moreDigests), len(show), ovIDs(show))
+	}
 
 	refs := make([]int64, 0, len(relevance.nodes))
 	for id := range relevance.nodes {
@@ -67,7 +78,7 @@ func renderWorkerTaskContext(data map[string]any, intent *db.Node) string {
 		}
 		b.WriteByte('\n')
 	}
-	b.WriteString("【按需回源】list_facts 查更多事实，node_detail(id) 查完整节点，expand_digest(id) 展开折叠历史，search_all_worker_traces 按关键词查执行记录；未出现的内容不等于未测试。\n")
+	b.WriteString("【按需回源】search_history(asset_id/q) 查询更早的相关记录，list_facts 查更多事实，node_detail(id) 查完整节点，expand_digest(id) 展开折叠历史，search_all_worker_traces 按关键词查执行记录；未出现的内容不等于未测试。\n")
 	return strings.TrimSpace(b.String())
 }
 
@@ -104,7 +115,7 @@ func workerContextRelevanceFor(intent *db.Node, intents, facts, findings []map[s
 			for _, row := range rows {
 				id := workerContextID(row["id"])
 				from := workerContextID(row["from_intent"])
-				if !r.nodes[id] && !r.intents[from] {
+				if !r.nodes[id] && !r.intents[from] && !workerContextAssetsOverlap(r.assets, row["asset_ids"]) {
 					continue
 				}
 				if !r.nodes[id] {
@@ -167,7 +178,8 @@ func workerContextSelectedIntents(rows []map[string]any, r workerContextRelevanc
 func workerContextSelectedFacts(rows []map[string]any, r workerContextRelevance) []map[string]any {
 	out := []map[string]any{}
 	for _, row := range rows {
-		if r.nodes[workerContextID(row["id"])] || r.intents[workerContextID(row["from_intent"])] {
+		if r.nodes[workerContextID(row["id"])] || r.intents[workerContextID(row["from_intent"])] ||
+			workerContextAssetsOverlap(r.assets, row["asset_ids"]) {
 			out = append(out, row)
 		}
 	}
@@ -177,7 +189,7 @@ func workerContextSelectedFacts(rows []map[string]any, r workerContextRelevance)
 func workerContextSelectedDigests(rows []map[string]any, r workerContextRelevance) []map[string]any {
 	out := []map[string]any{}
 	for _, row := range rows {
-		relevant := false
+		relevant := workerContextAssetsOverlap(r.assets, row["asset_ids"])
 		for _, work := range ovMaps(row["work"]) {
 			relevant = relevant || r.intents[workerContextID(work["intent_id"])]
 		}

@@ -118,6 +118,10 @@ func (t *ToolSet) searchHistory() actool.CoreTool {
 			if hasMore && len(nodes) > 0 {
 				out["next_before"] = nodes[len(nodes)-1].ID
 			}
-			return jsonResult(out)
+			result, err := jsonResult(out)
+			if err == nil {
+				t.rememberPlannerHistoryRead("search_history", string(key), result)
+			}
+			return result, err
 		})
 }

@@ -13,9 +13,11 @@ func TestPlannerHistoryReadDedupState(t *testing.T) {
 	if _, duplicate := planner.reusePlannerHistoryRead("node_detail", "7"); duplicate {
 		t.Fatal("first read must run")
 	}
+	evidence, _ := jsonResult(map[string]any{"node_id": 7, "evidence": "observed marker"})
+	planner.rememberPlannerHistoryRead("node_detail", "7", evidence)
 	result, duplicate := planner.reusePlannerHistoryRead("node_detail", "7")
-	if !duplicate || !strings.Contains(result.Flatten(), "直接使用该工具上次的返回") {
-		t.Fatalf("duplicate read was not replaced by a short response: %s", result.Flatten())
+	if !duplicate || !strings.Contains(result.Flatten(), "observed marker") {
+		t.Fatalf("duplicate read did not return cached evidence: %s", result.Flatten())
 	}
 	if _, duplicate := planner.reusePlannerHistoryRead("node_detail", "8"); duplicate {
 		t.Fatal("a different node must run")
@@ -69,17 +71,17 @@ func TestPlannerHistoryToolsDeduplicateEquivalentCalls(t *testing.T) {
 	tools := NewToolSet(store, "planner")
 	callReadJSON(t, tools.searchHistory(), `{"q":" dedup marker ","kinds":["fact","intent"]}`)
 	secondSearch := callReadJSON(t, tools.searchHistory(), `{"kinds":["intent","fact"],"q":"dedup marker"}`).(map[string]any)
-	if secondSearch["duplicate"] != true {
+	if secondSearch["total"] == nil || secondSearch["items"] == nil || secondSearch["duplicate"] != nil {
 		t.Fatalf("equivalent search was not deduplicated: %+v", secondSearch)
 	}
 	callReadJSON(t, tools.nodeDetail(), fmt.Sprintf(`{"id":%d}`, fact))
 	secondDetail := callReadJSON(t, tools.nodeDetail(), fmt.Sprintf(`{"id":"%d"}`, fact)).(map[string]any)
-	if secondDetail["duplicate"] != true {
+	if secondDetail["id"] == nil || secondDetail["payload"] == nil || secondDetail["duplicate"] != nil {
 		t.Fatalf("equivalent node detail was not deduplicated: %+v", secondDetail)
 	}
 	callReadJSON(t, tools.expandDigest(), fmt.Sprintf(`{"id":%d}`, digest))
 	secondExpand := callReadJSON(t, tools.expandDigest(), fmt.Sprintf(`{"id":%d}`, digest)).(map[string]any)
-	if secondExpand["duplicate"] != true {
+	if secondExpand["members"] == nil || secondExpand["id"] == nil || secondExpand["duplicate"] != nil {
 		t.Fatalf("equivalent digest expansion was not deduplicated: %+v", secondExpand)
 	}
 	if got := tools.HistoryReadStats(); got.Calls != 6 || got.Unique != 3 || got.Repeated != 3 {

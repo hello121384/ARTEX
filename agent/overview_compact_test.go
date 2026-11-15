@@ -157,7 +157,7 @@ func TestPlannerOverviewPreservesLargeRecords(t *testing.T) {
 	if !utf8.ValidString(got) {
 		t.Fatal("invalid UTF-8 in Planner overview")
 	}
-	for _, want := range []string{"graph_overview", "expand_digest(id)", goal, items[199]["summary"].(string)} {
+	for _, want := range []string{"graph_overview", "search_history", "keep original goals", "记录-0"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("complete large overview is missing %q", want)
 		}
@@ -211,17 +211,17 @@ func TestPlannerOverviewLargeViewKeepsCriticalAndRelatedHistory(t *testing.T) {
 	for _, want := range []string{
 		"critical goal", "critical hint", "critical running work", "CRITICAL DIGEST HISTORY",
 		"critical unresolved boundary", "graph_overview", "expand_digest(id)",
-		completed[199]["summary"].(string), "secondary related history 19",
+		"secondary related history 0",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("critical content %q missing from complete overview", want)
 		}
 	}
-	if strings.Contains(got, "【全局视图截断】") {
-		t.Fatal("large Planner overview was globally truncated")
+	if len([]rune(got)) > plannerOverviewRuneBudget {
+		t.Fatal("large Planner overview exceeded the global presentation budget")
 	}
-	if strings.Index(got, "CRITICAL DIGEST HISTORY") > strings.Index(got, "近期完成/中断") {
-		t.Fatal("secondary completed history was emitted before critical digest history")
+	if strings.Contains(got, completed[199]["summary"].(string)) {
+		t.Fatal("large Planner overview injected all old completed history")
 	}
 }
 
@@ -250,14 +250,14 @@ func TestPlannerOverviewRecoveryIDsSurviveLargeRecords(t *testing.T) {
 				t.Fatalf("missing %q in complete overview", want)
 			}
 		}
-		if data["related_tasks"] != nil && !strings.Contains(got, "【关联任务历史恢复入口】Digest ID: 44") {
+		if data["related_tasks"] != nil && !strings.Contains(got, "来源 Digest #44") {
 			t.Fatal("missing related digest recovery ID")
 		}
-		if data["goals"] != nil && !strings.Contains(got, goals[99]["text"].(string)) {
-			t.Fatal("last long goal was truncated")
+		if data["goals"] != nil && !strings.Contains(got, "目标-0") {
+			t.Fatal("highest-priority goal was not shown")
 		}
-		if data["goals"] == nil && !strings.Contains(got, results[199]["summary"].(string)) {
-			t.Fatal("last long Fact was truncated")
+		if data["goals"] == nil && strings.Contains(got, results[199]["summary"].(string)) {
+			t.Fatal("long-tail Fact flooded the Planner prompt")
 		}
 	}
 }
@@ -275,13 +275,13 @@ func TestPlannerOverviewPreservesRunningAndHints(t *testing.T) {
 		"goals": goals, "running_intents": running, "running_intents_total": 300,
 		"hints": []map[string]any{{"id": 900, "text": "must preserve hint"}},
 	})
-	for _, want := range []string{"running_intents_total=300", "hints=1", "执行中 running_intents", "must preserve hint", "graph_overview", running[299]["summary"].(string)} {
+	for _, want := range []string{"running_intents_total=300", "hints=1", "执行中", "must preserve hint", "graph_overview", "运行-0"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q in complete overview", want)
 		}
 	}
-	if strings.Contains(got, "本节已截断") {
-		t.Fatal("running or hint section was truncated")
+	if len([]rune(got)) > plannerOverviewRuneBudget || strings.Contains(got, running[299]["summary"].(string)) {
+		t.Fatal("large running or hint section was not bounded")
 	}
 }
 

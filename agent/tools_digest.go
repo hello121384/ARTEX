@@ -43,6 +43,7 @@ type lineageDigestView struct {
 	yields  map[int64][]int64
 	covered map[int64]int64
 	hot     map[int64]bool
+	edges   []db.Edge // reuse the full-graph edge snapshot in overview; no 5000-edge cap
 }
 
 func (v *lineageDigestView) hidden(id int64) bool {
@@ -70,6 +71,7 @@ func loadLineageDigestView(store *db.ExplorationStore, digests []*db.Node, fullG
 			view.nodes = nodes
 			view.hot = g.hotSet()
 			edges = graphEdges
+			view.edges = graphEdges
 		}
 	}
 	if len(digests) == 0 {
@@ -364,6 +366,10 @@ func (t *ToolSet) expandDigest() actool.CoreTool {
 				out["inherited"] = true
 				out["source_task_id"] = srcTaskID
 			}
-			return jsonResult(out)
+			result, err := jsonResult(out)
+			if err == nil {
+				t.rememberPlannerHistoryRead("expand_digest", fmt.Sprint(in.ID), result)
+			}
+			return result, err
 		})
 }
