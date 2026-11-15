@@ -76,6 +76,7 @@ import type {
   NotificationDelivery,
   NotificationFilter,
   NotificationMeta,
+  PlannerOverviewPreviewData,
   PromptVar,
   PromptVersion,
   ProxyPoolEntry,
@@ -427,6 +428,8 @@ export const api = {
   tasks: () =>
     get<{ tasks: Task[]; active: string }>("/tasks").then((r) => ({ tasks: arr(r.tasks), active: r.active ?? "" })),
   task: (id: string) => get<Task>(`/tasks/${encodeURIComponent(id)}`),
+  plannerOverviewPreview: (id: string) =>
+    get<PlannerOverviewPreviewData>(`/tasks/${encodeURIComponent(id)}/planner-overview-preview`),
   createTask: (input: {
     name?: string;
     remark?: string;

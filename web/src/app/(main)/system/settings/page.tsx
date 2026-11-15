@@ -32,6 +32,7 @@ import type { EgressReport, LLMProfile, ProxyPoolEntry, Settings, WorkerPool } f
 import { useEgressIp } from "../../_components/egress-ip-banner";
 import { BasicAuthCard } from "./_components/basic-auth-card";
 import { McpServerCard } from "./_components/mcp-server-card";
+import { PlannerOverviewPreview } from "./_components/planner-overview-preview";
 import { UpdateCard } from "./_components/update-card";
 
 export default function SystemSettingsPage() {
@@ -110,6 +111,8 @@ export default function SystemSettingsPage() {
   const [injectWorker, setInjectWorker] = React.useState(true);
   // 实验功能:noa 上下文压缩(默认关)。
   const [noaCompaction, setNoaCompaction] = React.useState(false);
+  const [plannerCompactOverview, setPlannerCompactOverview] = React.useState(true);
+  const [workerCompactContext, setWorkerCompactContext] = React.useState(false);
   // 纯前端偏好：不走 /api/settings，直接读写 localStorage。
   const sendMode = useChatSendMode();
   const {
@@ -157,6 +160,8 @@ export default function SystemSettingsPage() {
     setInjectPlanner(s.constraints_inject_planner !== false);
     setInjectWorker(s.constraints_inject_worker !== false);
     setNoaCompaction(!!s.noa_compaction);
+    setPlannerCompactOverview(s.planner_compact_overview !== false);
+    setWorkerCompactContext(!!s.worker_compact_context);
   }, []);
 
   const saveWorkers = () => {
@@ -396,6 +401,34 @@ export default function SystemSettingsPage() {
       .catch((e) => {
         setNoaCompaction(!v); // revert on failure
         toast.error(t("settings.saveFailed", { message: localizedError(e, t) }));
+      });
+  };
+
+  const togglePlannerCompactOverview = (v: boolean) => {
+    setPlannerCompactOverview(v);
+    api
+      .setSettings({ planner_compact_overview: v })
+      .then((s) => {
+        apply(s);
+        toast.success(t(v ? "settings.plannerOverviewOn" : "settings.plannerOverviewOff"));
+      })
+      .catch((e) => {
+        setPlannerCompactOverview(!v);
+        toast.error(t("settings.saveFailedPrefix") + localizedError(e, t));
+      });
+  };
+
+  const toggleWorkerCompactContext = (v: boolean) => {
+    setWorkerCompactContext(v);
+    api
+      .setSettings({ worker_compact_context: v })
+      .then((s) => {
+        apply(s);
+        toast.success(t(v ? "settings.workerCompactOn" : "settings.workerCompactOff"));
+      })
+      .catch((e) => {
+        setWorkerCompactContext(!v);
+        toast.error(t("settings.saveFailedPrefix") + localizedError(e, t));
       });
   };
 
@@ -1388,19 +1421,51 @@ export default function SystemSettingsPage() {
                   {t("settings.noaHelpStart")}
                   <b>{t("settings.noaAgentTypes")}</b>
                   {t("settings.noaHelpEnd")}
+                  <br />
+                  <b>{t("settings.plannerCompactTitle")}</b>{t("settings.plannerCompactHelp")}
+                  <br />
+                  <b>{t("settings.workerCompactTitle")}</b>{t("settings.workerCompactHelp")}
                 </CardDescription>
               </CardHeader>
-              <CardContent className="flex items-center justify-between gap-4">
-                <Label htmlFor="noa-compaction" className="text-sm font-normal text-muted-foreground">
-                  {t("settings.noa")}
-                  {noaCompaction ? t("settings.enabledSuffix") : t("settings.disabledSuffix")}
-                </Label>
-                <Switch
-                  id="noa-compaction"
-                  checked={noaCompaction}
-                  disabled={!loaded}
-                  onCheckedChange={toggleNoaCompaction}
-                />
+              <CardContent className="flex flex-col gap-4">
+                <div className="flex items-center justify-between gap-4">
+                  <Label htmlFor="noa-compaction" className="text-sm font-normal text-muted-foreground">
+                    {t("settings.noa")}{noaCompaction ? t("settings.enabledSuffix") : t("settings.disabledSuffix")}
+                  </Label>
+                  <Switch
+                    id="noa-compaction"
+                    checked={noaCompaction}
+                    disabled={!loaded}
+                    onCheckedChange={toggleNoaCompaction}
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-4">
+                  <Label htmlFor="planner-compact-overview" className="text-sm font-normal text-muted-foreground">
+                    {t("settings.plannerCompactTitle")}
+                    {plannerCompactOverview ? t("settings.enabledSuffix") : t("settings.disabledSuffix")}
+                  </Label>
+                  <Switch
+                    id="planner-compact-overview"
+                    checked={plannerCompactOverview}
+                    disabled={!loaded}
+                    onCheckedChange={togglePlannerCompactOverview}
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-4">
+                  <Label htmlFor="worker-compact-context" className="text-sm font-normal text-muted-foreground">
+                    {t("settings.workerCompactTitle")}
+                    {workerCompactContext ? t("settings.enabledSuffix") : t("settings.disabledSuffix")}
+                  </Label>
+                  <Switch
+                    id="worker-compact-context"
+                    checked={workerCompactContext}
+                    disabled={!loaded}
+                    onCheckedChange={toggleWorkerCompactContext}
+                  />
+                </div>
+                <div className="border-t pt-4">
+                  <PlannerOverviewPreview />
+                </div>
               </CardContent>
             </Card>
 

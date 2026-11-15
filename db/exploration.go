@@ -842,10 +842,64 @@ func (s *ExplorationStore) Nodes(limit int) ([]*Node, error) {
 
 // NodeFilter narrows a NodesPage query. Empty fields include every value.
 type NodeFilter struct {
-	Kinds  []string // exploration_nodes.kind
-	States []string // exploration_nodes.state
-	Query  string   // case-insensitive substring over payload text / origin
-	Asc    bool     // true = oldest first (replay); default newest first (broadcast)
+	Kinds               []string // exploration_nodes.kind
+	States              []string // exploration_nodes.state
+	Query               string   // space-separated AND terms and OR groups over payload text / origin; #id also matches a node id
+	AssetID             int64    // directly anchored nodes, or digests covering an anchored member
+	TerminalIntentsOnly bool     // restrict intents to states safe to inherit from a source task
+	Asc                 bool     // true = oldest first (replay); default newest first (broadcast)
+}
+
+func historyNodeQuery(query string, args []any) (string, []any) {
+	q := strings.TrimSpace(query)
+	if q == "" {
+		return "", args
+	}
+	escapeLike := func(value string) string {
+		return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(value)
+	}
+	textCondition := func() string {
+		mark := "$" + fmt.Sprint(len(args))
+		return `(payload::text ILIKE ` + mark + ` ESCAPE '\' OR COALESCE(origin,'') ILIKE ` + mark + ` ESCAPE '\')`
+	}
+	if idStr := strings.TrimPrefix(q, "#"); idStr != "" {
+		if id, err := strconv.ParseInt(idStr, 10, 64); err == nil {
+			args = append(args, "%"+escapeLike(q)+"%")
+			condition := textCondition()
+			args = append(args, id)
+			return "(" + condition + " OR id = $" + fmt.Sprint(len(args)) + ")", args
+		}
+	}
+
+	var groups [][]string
+	var terms []string
+	for _, term := range strings.Fields(q) {
+		if strings.EqualFold(term, "OR") {
+			if len(terms) > 0 {
+				groups = append(groups, terms)
+				terms = nil
+			}
+			continue
+		}
+		terms = append(terms, term)
+	}
+	if len(terms) > 0 {
+		groups = append(groups, terms)
+	}
+	if len(groups) == 0 {
+		groups = [][]string{{q}}
+	}
+
+	groupConditions := make([]string, 0, len(groups))
+	for _, group := range groups {
+		termConditions := make([]string, 0, len(group))
+		for _, term := range group {
+			args = append(args, "%"+escapeLike(term)+"%")
+			termConditions = append(termConditions, textCondition())
+		}
+		groupConditions = append(groupConditions, "("+strings.Join(termConditions, " AND ")+")")
+	}
+	return "(" + strings.Join(groupConditions, " OR ") + ")", args
 }
 
 // NodesPage returns one 1-based page of this exploration's nodes plus the total
@@ -854,6 +908,12 @@ type NodeFilter struct {
 // is BIGSERIAL and therefore creation order — stable when several nodes share a
 // created_at second.
 func (s *ExplorationStore) NodesPage(f NodeFilter, page, size int) ([]*Node, int, error) {
+	return s.nodesPage(f, page, size, 0)
+}
+
+// nodesPage applies before only to the page query. The total deliberately counts
+// every row matching f, so it remains stable while a client follows the cursor.
+func (s *ExplorationStore) nodesPage(f NodeFilter, page, size int, before int64) ([]*Node, int, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -880,24 +940,34 @@ func (s *ExplorationStore) NodesPage(f NodeFilter, page, size int) ([]*Node, int
 	}
 	addIn("kind", f.Kinds)
 	addIn("state", f.States)
-	if q := strings.TrimSpace(f.Query); q != "" {
-		args = append(args, "%"+q+"%")
+	if f.TerminalIntentsOnly {
+		conds = append(conds, "(kind <> 'intent' OR state IN ('done','blocked','exhausted','stopped'))")
+	}
+	if f.AssetID > 0 {
+		args = append(args, f.AssetID)
 		mark := "$" + fmt.Sprint(len(args))
-		ors := []string{"payload::text ILIKE " + mark, "COALESCE(origin,'') ILIKE " + mark}
-		// 纯数字(或 UI 里带 # 前缀的形式,如「#41」)当作节点 id 精确匹配,方便直接定位某个节点。
-		if idStr := strings.TrimPrefix(q, "#"); idStr != "" {
-			if id, err := strconv.ParseInt(idStr, 10, 64); err == nil {
-				args = append(args, id)
-				ors = append(ors, "id = $"+fmt.Sprint(len(args)))
-			}
-		}
-		conds = append(conds, "("+strings.Join(ors, " OR ")+")")
+		conds = append(conds, `(EXISTS (
+			SELECT 1 FROM exploration_anchors ea
+			WHERE ea.node_id=exploration_nodes.id AND ea.asset_id=`+mark+`
+		) OR EXISTS (
+			SELECT 1 FROM exploration_edges de
+			JOIN exploration_anchors ea ON ea.node_id=de.dst_id
+			WHERE de.src_id=exploration_nodes.id AND de.rel='covers' AND ea.asset_id=`+mark+`
+		))`)
+	}
+	if condition, queryArgs := historyNodeQuery(f.Query, args); condition != "" {
+		conds = append(conds, condition)
+		args = queryArgs
 	}
 	where := " WHERE " + strings.Join(conds, " AND ")
 
 	var total int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM exploration_nodes`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
+	}
+	if before > 0 {
+		args = append(args, before)
+		where += " AND id < $" + fmt.Sprint(len(args))
 	}
 	order := "DESC"
 	if f.Asc {

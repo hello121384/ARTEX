@@ -106,7 +106,8 @@ type ToolSet struct {
 	// round is told the round was fired by a new hint and spells the hint out, instead of
 	// the planner having to spot it folded into the graph overview. Wired for the main
 	// agent + cross-task orchestration; nil elsewhere → falls back to the bare notify.
-	notifyHint func(texts []string)
+	notifyHint   func(texts []string)
+	historyReads historyReadState
 }
 
 // SetNotifyGoal wires the goal-add trigger callback (see ToolSet.notifyGoal). Set only
@@ -371,6 +372,9 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	hints, _ := t.ts.ListByKind(db.KindHint, 50)
 	hsum := make([]map[string]any, 0, len(hints))
 	for _, h := range hints {
+		if h.State != "active" {
+			continue
+		}
 		var p map[string]any
 		_ = json.Unmarshal(h.Payload, &p)
 		hint := map[string]any{"id": h.ID, "state": h.State, "text": p["text"]}
@@ -397,21 +401,11 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 			factFrom[e.To] = e.From
 		}
 	}
-	// cold-digest §6: members folded into an active digest are shown via cold_digests
-	// (below), not the flat recent_* lists. `covered` maps member id → its digest id.
-	// §6 render-time revival check: a covered member that has become hot again (a new
-	// intent derived from it) must reappear this round — so `hidden` folds a member out
-	// only when it is covered AND still cold.
-	covered, _ := t.ts.CoveredMembers()
-	// Render-time hot set (ancestor of a live intent / fact under a live intent).
-	// §6 revival check: a covered member that revived (now hot) must NOT stay folded
-	// — hidden() only folds a member out when it is covered AND still cold. Computed
-	// every round (cheap for real graph sizes); nil map degrades safely.
-	var hotAtRender map[int64]bool
-	if cg, _, err := loadColdGraph(t.ts); err == nil {
-		hotAtRender = cg.hotSet()
-	}
-	hidden := func(id int64) bool { _, c := covered[id]; return c && !hotAtRender[id] }
+	// cold-digest §6: one shared graph snapshot drives both member revival and
+	// digest cards, avoiding a second full-graph read in the same overview.
+	ads, _ := t.ts.ActiveDigests()
+	digestView := loadLineageDigestView(t.ts, ads, true)
+	hidden := digestView.hidden
 	const openIntentsCap = 30
 	fr, _ := t.ts.Frontier(openIntentsCap) // priority DESC, id ASC —— 优先级最高的前 N 条；真实总数见 frontier_open
 	out["open_intents"] = compactIntents(fr, parentsOf, yieldsOf)
@@ -427,6 +421,12 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 			}
 			recentDone = append(recentDone, n) // 最新在前（all 按 id 降序）；折叠的已剔除，输出时截最新 N
 		}
+	}
+	// Query by state instead of filtering only the newest 300 intents: an older
+	// running intent must still prevent the planner from treating the task as idle.
+	if live, total, err := t.ts.NodesPage(db.NodeFilter{Kinds: []string{db.KindIntent}, States: []string{"running"}}, 1, 200); err == nil {
+		running = live
+		out["running_intents_total"] = total
 	}
 	out["running_intents"] = compactIntents(running, parentsOf, yieldsOf)
 	// done_intents_total：已结束意图（done/blocked/exhausted）总数，与 recent_done_intents
@@ -502,13 +502,22 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		recentDone = recentDone[:recentDoneCap]
 	}
 	out["recent_done_intents"] = compactIntents(recentDone, parentsOf, yieldsOf)
-	// cold-digest §6.1: 折叠冷区的 digest body，按最新成员时间降序取前 N；被截的更旧 digest
-	// 只给裸 id（仍可 expand_digest 展开），避免冷区唯一出口被无限拉长。
-	const coldDigestsCap = 15
-	if cds, more := coldDigestsRecent(t.ts, coldDigestsCap); len(cds) > 0 {
-		out["cold_digests"] = cds // [{id, body, member_count}] —— 直接读 body (§6.1)
+	// Every folded member needs a decision-grade replacement in the default view.
+	// The converter bounds presentation separately; hiding older cards here would
+	// hide both the original members and their only useful summary.
+	if cds, more, titles := coldDigestsRecentView(digestView, len(digestView.digests)); len(cds) > 0 {
+		out["cold_digests"] = cds
+		out["cold_digest_titles"] = titles
 		if len(more) > 0 {
-			out["cold_digests_more"] = more // 被截断的更旧 digest 的 id；用 expand_digest(id) 展开
+			out["cold_digests_more"] = more
+		}
+	}
+	const uncompressedColdCap = 20
+	if nodes, more, total := uncompressedColdNodes(digestView, uncompressedColdCap); total > 0 {
+		out["uncompressed_cold_total"] = total
+		out["uncompressed_cold_nodes"] = nodes
+		if len(more) > 0 {
+			out["uncompressed_cold_more"] = more
 		}
 	}
 	// the original task (root) so the planner always has it, not just the
@@ -676,7 +685,9 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		ts := source.Store
 		// §2 cross-task: render the source task's OWN folded view — fold out the
 		// members it has already folded, and surface its cold_digests read-only.
-		hidden := hiddenMembersFor(ts)
+		ads, _ := ts.ActiveDigests()
+		digestView := loadLineageDigestView(ts, ads, true)
+		hidden := digestView.hidden
 		budget := overviewTextBudget{remaining: perSourceTextBudget}
 		item := map[string]any{
 			"source_task_id": source.Task.TaskID,
@@ -717,6 +728,9 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		hints, _ := ts.ListByKind(db.KindHint, relatedOverviewMaxHintsPerSource)
 		hintSummary := make([]map[string]any, 0, len(hints))
 		for _, hint := range hints {
+			if hint.State != "active" {
+				continue
+			}
 			var payload map[string]any
 			_ = json.Unmarshal(hint.Payload, &payload)
 			hintSummary = append(hintSummary, inheritedMap(map[string]any{
@@ -808,14 +822,29 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		// §2 cross-task: the source task's folded cold region, read-only, newest-member
 		// first & capped like the current task's. Members (and overflow digests) are
 		// resolvable via expand_digest(id)/node_detail(id), which search source tasks.
-		if cds, more := coldDigestsRecent(ts, relatedOverviewMaxDigestsPerSource); len(cds) > 0 {
+		if cds, more, titles := coldDigestsRecentView(digestView, relatedOverviewMaxDigestsPerSource); len(cds) > 0 {
 			for _, cd := range cds {
 				cd["inherited"] = true
 				cd["source_task_id"] = source.Task.TaskID
 			}
+			for _, title := range titles {
+				title["source_task_id"] = source.Task.TaskID
+			}
 			item["cold_digests"] = cds
+			item["cold_digest_titles"] = titles
 			if len(more) > 0 {
-				item["cold_digests_more"] = more // 被截断的更旧 digest 的 id；expand_digest(id) 展开
+				item["cold_digests_more"] = more
+			}
+		}
+		if nodes, more, total := uncompressedColdNodes(digestView, relatedOverviewMaxFactsPerSource); total > 0 {
+			for _, node := range nodes {
+				inheritedMap(node, source.Task.TaskID)
+				node["summary"] = budget.take(node["summary"], 400)
+			}
+			item["uncompressed_cold_total"] = total
+			item["uncompressed_cold_nodes"] = nodes
+			if len(more) > 0 {
+				item["uncompressed_cold_more"] = more
 			}
 		}
 		if statsErr == nil {
@@ -1005,14 +1034,20 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 			if id <= 0 {
 				return actool.Errorf("id 必填"), nil
 			}
+			if result, duplicate := t.reusePlannerHistoryRead("node_detail", strconv.FormatInt(id, 10)); duplicate {
+				return result, nil
+			}
 			n, err := t.ts.GetNodeWithSources(id)
 			if err != nil {
+				t.retryPlannerHistoryRead("node_detail", strconv.FormatInt(id, 10))
 				return actool.Errorf(err.Error()), nil
 			}
 			if n == nil {
+				t.retryPlannerHistoryRead("node_detail", strconv.FormatInt(id, 10))
 				return actool.Errorf(fmt.Sprintf("未找到探索节点 %d。若你想查的是资产，请用 list_assets / asset_neighbors（资产与探索节点是不同的 id 空间，资产 id 不能传给 node_detail）。", id)), nil
 			}
 			if err := t.ts.PopulateFindingTrafficIDs([]*db.Node{n}); err != nil {
+				t.retryPlannerHistoryRead("node_detail", strconv.FormatInt(id, 10))
 				return actool.Errorf(err.Error()), nil
 			}
 			return jsonResult(n) // full payload incl. detail / evidence, plus explicit finding IDs
@@ -2070,7 +2105,7 @@ func (t *ToolSet) listWorkerTraces() actool.CoreTool {
 // PlannerTools is the read + intent-generation + goal-judgement tool set.
 func (t *ToolSet) PlannerTools() []actool.CoreTool {
 	return []actool.CoreTool{
-		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),
+		t.graphOverview(), t.searchHistory(), t.listFindings(), t.listFacts(), t.nodeDetail(),
 		// cold-digest §6.1: restore folded cold nodes (digest body → members → detail).
 		t.expandDigest(),
 		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.listGoals(), t.addIntent(), t.proveGoal(), t.goalMet(),

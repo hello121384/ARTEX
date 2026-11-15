@@ -31,15 +31,16 @@ type Planner struct {
 	killWork          func(intentID int64) error             // engine callback to terminate a running work (nil = off)
 	steerWork         func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
 	proxyAddr         string                                 // recording proxy for WebFetch (empty = direct)
-	proxyAddrFn       func() string
-	proxyCACert       string        // recording proxy's CA cert path (HTTPS verify)
-	webSearch         WebSearchOpts // web_search tool backend selection (off by default)
-	workDir           string        // shared work dir (surfaced in prompt as artifact-output target)
-	injectConstraints func() bool   // resolver: inject task operation constraints into system prompt? (nil = yes)
-	nonStreamingFn    func() bool   // resolver: use non-streaming (Complete) path? (nil = streaming)
-	noaEnabledFn      func() bool   // resolver: use experimental noa compaction? (nil = off)
-	maxTokensFn       func() int    // resolver: per-reply output cap (nil/0 = send no cap)
-	compactor         *Compactor    // cold-node compaction (§7); nil = disabled
+	proxyAddrFn       func() string                          // optional dynamic recording proxy resolver
+	proxyCACert       string                                 // recording proxy's CA cert path (HTTPS verify)
+	webSearch         WebSearchOpts                          // web_search tool backend selection (off by default)
+	workDir           string                                 // shared work dir (surfaced in prompt as artifact-output target)
+	injectConstraints func() bool                            // resolver: inject task operation constraints into system prompt? (nil = yes)
+	nonStreamingFn    func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
+	noaEnabledFn      func() bool                            // resolver: use experimental noa compaction? (nil = off)
+	compactOverviewFn func() bool                            // resolver: render compact Planner overview? (nil = on)
+	maxTokensFn       func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	compactor         *Compactor                             // cold-node compaction (§7); nil = disabled
 
 	// todos keeps ONE plan-scratchpad per task (keyed by exploration id) so the
 	// planner's multi-step plan survives across wake-ups — each Plan() is a fresh
@@ -70,6 +71,14 @@ func (p *Planner) nonStreaming() bool { return p.nonStreamingFn != nil && p.nonS
 // context-compression mechanism. nil/unset = off (built-in compaction). Read per
 // run so the settings toggle takes effect without rebuilding the agent.
 func (p *Planner) SetNoaEnabled(fn func() bool) { p.noaEnabledFn = fn }
+
+// SetCompactOverview wires the Planner-only graph overview converter. nil = on.
+// Read per run so changing the setting does not require rebuilding task agents.
+func (p *Planner) SetCompactOverview(fn func() bool) { p.compactOverviewFn = fn }
+
+func (p *Planner) compactOverview() bool {
+	return p.compactOverviewFn == nil || p.compactOverviewFn()
+}
 
 // SetMaxTokens wires a resolver for the per-reply output cap. nil/unset or 0 =
 // send no cap and let the endpoint decide. Read per run, like nonStreaming.
@@ -281,15 +290,19 @@ func truncOutput(s string, n int) string {
 	return string(r[:n]) + " …（已截断，完整见 get_worker_output）"
 }
 
-// renderGraphOverview folds the pre-computed graph_overview snapshot into the
-// wake-up prompt so the planner starts each round with the full situation in
-// hand — saving the round-trip it would otherwise spend calling the tool. It is
-// the exact same JSON graph_overview would return; deeper detail is still one
-// tool call away (node_detail / list_facts / …).
-func renderGraphOverview(data map[string]any) string {
+// renderGraphOverview prefetches the same graph_overview snapshot in either
+// mode. The converter only changes its Planner prompt representation.
+func renderGraphOverview(data map[string]any, compact bool) string {
+	if compact {
+		view := plannerOverviewText(data)
+		if view == "" {
+			return ""
+		}
+		return "\n\n【本轮态势（graph_overview 同源压缩视图；保留 Digest 正文、决策字段与回源入口）】：\n" + view
+	}
 	b, err := json.Marshal(data)
 	if err != nil {
-		return "" // fall back to the model calling graph_overview itself
+		return ""
 	}
 	return "\n\n【本轮态势（graph_overview 预取，等同你调用该工具的返回；需要细节再按需调 node_detail/list_facts 等）】：\n" + string(b)
 }
@@ -308,11 +321,11 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 
 **每次唤醒的决策流程**：
 
-1. **完整态势已附在本提示下方**（就是 graph_overview 的返回，无需再调它）：task（原始标题+目标/根节点）、资产计数、goals+状态、open/running/recent_done 意图、sites_without_endpoints（无端点的站点，提示可能待探的方向）、facts（探索事实数，与漏洞是两类）、recent_facts（{id,summary,confidence?}）。
-   - **范围**：探索节点（goals/意图/facts/findings）只含本任务；**资产默认按任务隔离**（仅本任务及明确关联任务；用户开启「共享全局资产」后可查询全库）——出现非本任务相关的资产时忽略。
+1. **本轮态势已附在本提示下方**（与 graph_overview 同源的只读视图，可能是紧凑文本或完整 JSON）：task、资产计数、sites_without_endpoints（无端点站点）、goals+状态、open/running/recent_done 意图、facts/findings 统计、recent_facts，以及历史 Digest 正文、工作状态、关键结果、未完成原因和来源 ID。需要完整结构化快照时调 graph_overview；拿不准历史是否覆盖某资产、机理或状态时，用 search_history 数据库检索（不要只凭标题目录断言未测）；折叠历史用 expand_digest(id)，完整证据用 node_detail(id)。未直接显示不等于未测试。
+   - **范围**：探索节点（goals/意图/facts/findings）只含本任务；**资产默认按任务隔离**（仅本任务及明确关联任务；用户开启「共享全局资产」后才可查询全库）——出现非本任务相关的资产时忽略。
    - **血缘**：每个意图带 parents（上游：派生自哪些事实/意图）和 yields（下游：产生了哪些事实/发现），recent_facts 每条带 from_intent；据此理解"哪些事实来自哪个方向、能否综合出新方向"。
    - **否定/存疑观察**（recent_facts 里"端口关闭/不可注入"等）是 worker 的观察、不是定论：采信前先 node_detail(id) 看 evidence——evidence 扎实、confidence=observed 且手段已穷尽的才视为该方向暂时封住；evidence 缺失、只是"看起来像/只探一次"、或 confidence=inferred 的，按【尚未探明】处理，若在范围内且无其它意图覆盖，默认派一条复核意图去证实或推翻（**同一否定方向至多复核一次**；复核后仍为否定、且证据合理，就尊重该结论、不再派）。
-   - **要更深细节才按需调**：list_facts（分页，最新在前，默认 20，可 q 过滤、before 翻页，带 total/has_more）、list_findings（全部漏洞）、node_detail(id)（完整证据/详情；列表/recent_facts 只给摘要）、list_assets（pull：q 搜索、type/company_id/task_id 过滤、分页，或 id/ids 直取）、asset_neighbors。资产是否共享由用户设置决定，不能自行开启；共享不代表扩大测试授权。
+   - **要更深细节才按需调**：search_history（统一历史索引，可按 q/kinds/states/asset_id 过滤并分页）、list_facts（只查 Fact）、list_findings（全部漏洞）、expand_digest(id)（折叠成员）、node_detail(id)（完整证据）、list_assets（资产检索，支持 q/type/company_id/task_id 过滤和 id/ids 查询）、asset_neighbors。资产是否共享由用户设置决定，不能自行开启；共享不代表扩大测试授权，也不要默认拉取全量。
 
 2. **判目标（核心职责）**：goals 字段已含目标与状态；对已被某发现/事实证明的未达成目标，调 prove_goal(goal_id, evidence_id, reason) 标 met。**当你标记的恰是最后一个未完成目标时，系统自动判定整个任务完成**——收官只由逐个 prove_goal 驱动，没有别的"一键完成"手段。
    - ⚠️ **量化验收核对（严禁提前盖章）**：目标含可量化条件（覆盖度达 X%、达到指定数量、获得某权限）时，prove_goal 前【必须】核对上方 graph_overview 的实测值（coverage.pct、findings_total 计数等）：未达标就【禁止】prove_goal，改派意图补差；不得以"大体达成/核心已拿下"为由提前标 met。例：要求覆盖度 100% 而实测 coverage.pct=40% → 未达成，继续派补测意图。
@@ -381,7 +394,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// 关键态势（刚完成的意图 + 预取的完整图）改放【本轮 user 输入】(见下方 input)，system
 	// 只留静态规划正文。move-out 让 system 每轮稳定、更利于缓存；代价是若单轮变长，态势可能
 	// 被 compaction 压缩（planner 单轮通常短，风险低）。situational 会拼进下方 input。
-	situational := renderTriggers(ts, triggers) + renderGraphOverview(tsx.graphOverviewData())
+	situational := renderTriggers(ts, triggers) + renderGraphOverview(tsx.graphOverviewData(), p.compactOverview())
 	// 任务级 deadline / 终局模式(经 ctx 注入,见 taskclock.go)。终局那一轮把任务超时
 	// planner 收尾词作为【本轮操作指令】拼进本轮 user 输入(随 situational),让它只做最后
 	// 目标判定、不产新意图。

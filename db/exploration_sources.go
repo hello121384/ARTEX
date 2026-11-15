@@ -155,6 +155,48 @@ func (s *ExplorationStore) ListByKindPageWithSources(kind string, before int64, 
 	return merged, hasMore, total, nil
 }
 
+// NodesBeforeWithSources searches this exploration and its direct sources in SQL,
+// then merges one newest-first cursor page. Each store contributes limit+1 rows,
+// which is sufficient to construct the global page because node ids are unique.
+// The total counts all matching history, independent of the cursor.
+func (s *ExplorationStore) NodesBeforeWithSources(f NodeFilter, before int64, limit int) (nodes []*Node, hasMore bool, total int, err error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	own, ownTotal, err := s.nodesPage(f, 1, limit+1, before)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	merged := own
+	total = ownTotal
+
+	sources, err := s.DirectSourceStores()
+	if err != nil {
+		return nil, false, 0, err
+	}
+	f.TerminalIntentsOnly = true
+	for _, source := range sources {
+		page, count, err := source.Store.nodesPage(f, 1, limit+1, before)
+		if err != nil {
+			return nil, false, 0, err
+		}
+		for _, n := range page {
+			merged = append(merged, markInheritedNode(n, source.Task.TaskID))
+		}
+		total += count
+	}
+
+	sort.Slice(merged, func(i, j int) bool { return merged[i].ID > merged[j].ID })
+	hasMore = len(merged) > limit
+	if hasMore {
+		merged = merged[:limit]
+	}
+	return merged, hasMore, total, nil
+}
+
 // GetNodeWithSources reads a node only when it belongs to this exploration or
 // one of its direct sources. Inherited nodes are tagged so tool callers can keep
 // them read-only and show their provenance.

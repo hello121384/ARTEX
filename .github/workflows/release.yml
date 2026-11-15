@@ -6,8 +6,6 @@ on:
         description: "已存在的正式版本标签，例如 v0.3.15"
         required: true
         type: string
-  push:
-    tags: ["v*"]
 
 permissions:
   contents: read
