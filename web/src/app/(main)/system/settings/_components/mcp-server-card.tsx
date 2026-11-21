@@ -49,6 +49,7 @@ const SCOPES: { value: McpServerScope; key: string }[] = [
   { value: "read", key: "read" },
   { value: "assets:read", key: "assetsRead" },
   { value: "task:propose", key: "taskPropose" },
+  { value: "task:auto_dispatch", key: "taskAutoDispatch" },
   { value: "task:create", key: "taskCreate" },
   { value: "task:control", key: "taskControl" },
 ];
@@ -186,8 +187,10 @@ export function McpServerCard() {
 
   const toggleIn = <T,>(list: T[], value: T, on: boolean) => (on ? [...list, value] : list.filter((v) => v !== value));
 
-  const needsCompanies = form.scopes.includes("assets:read") || form.scopes.includes("task:propose");
+  const needsCompanies =
+    form.scopes.includes("assets:read") || form.scopes.includes("task:propose") || form.scopes.includes("task:auto_dispatch");
   const hasExecutionScope = form.scopes.includes("task:create") || form.scopes.includes("task:control");
+  const hasAutoDispatchScope = form.scopes.includes("task:auto_dispatch");
 
   const create = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -454,12 +457,20 @@ export function McpServerCard() {
                       className="mt-0.5"
                       checked={form.scopes.includes(scope.value)}
                       disabled={
-                        ((scope.value === "assets:read" || scope.value === "task:propose") && hasExecutionScope) ||
-                        ((scope.value === "task:create" || scope.value === "task:control") && needsCompanies)
+                        ((scope.value === "assets:read" || scope.value === "task:propose" || scope.value === "task:auto_dispatch") && hasExecutionScope) ||
+                        ((scope.value === "task:create" || scope.value === "task:control") && needsCompanies) ||
+                        (scope.value === "task:auto_dispatch" && form.scopes.includes("task:propose")) ||
+                        (scope.value === "task:propose" && hasAutoDispatchScope)
                       }
-                      onCheckedChange={(on) =>
-                        setForm({ ...form, scopes: toggleIn(form.scopes, scope.value, on === true) })
-                      }
+                      onCheckedChange={(on) => {
+                        const selecting = on === true;
+                        setForm({
+                          ...form,
+                          scopes: toggleIn(form.scopes, scope.value, selecting),
+                          maxActive: selecting && scope.value === "task:auto_dispatch" && Number(form.maxActive) === 0 ? "3" : form.maxActive,
+                          maxHourly: selecting && scope.value === "task:auto_dispatch" && Number(form.maxHourly) === 0 ? "10" : form.maxHourly,
+                        });
+                      }}
                     />
                     <span>
                       {t(`settings.mcpServer.scope.${scope.key}`)}
@@ -510,31 +521,35 @@ export function McpServerCard() {
                 />
                 <FieldDescription>{t("settings.mcpServer.expiryHelp")}</FieldDescription>
               </Field>
-              {form.scopes.includes("task:create") ? (
+              {form.scopes.includes("task:create") || hasAutoDispatchScope ? (
                 <>
                   <Field>
                     <FieldLabel htmlFor="mcp-token-active">{t("settings.mcpServer.maxActive")}</FieldLabel>
                     <Input
                       id="mcp-token-active"
                       type="number"
-                      min={0}
-                      max={10000}
+                      min={hasAutoDispatchScope ? 1 : 0}
+                      max={hasAutoDispatchScope ? 3 : 10000}
                       value={form.maxActive}
                       onChange={(e) => setForm({ ...form, maxActive: e.target.value })}
                     />
-                    <FieldDescription>{t("settings.mcpServer.maxActiveHelp")}</FieldDescription>
+                    <FieldDescription>
+                      {t(hasAutoDispatchScope ? "settings.mcpServer.autoDispatchMaxActiveHelp" : "settings.mcpServer.maxActiveHelp")}
+                    </FieldDescription>
                   </Field>
                   <Field>
                     <FieldLabel htmlFor="mcp-token-hourly">{t("settings.mcpServer.maxHourly")}</FieldLabel>
                     <Input
                       id="mcp-token-hourly"
                       type="number"
-                      min={0}
-                      max={10000}
+                      min={hasAutoDispatchScope ? 1 : 0}
+                      max={hasAutoDispatchScope ? 10 : 10000}
                       value={form.maxHourly}
                       onChange={(e) => setForm({ ...form, maxHourly: e.target.value })}
                     />
-                    <FieldDescription>{t("settings.mcpServer.maxHourlyHelp")}</FieldDescription>
+                    <FieldDescription>
+                      {t(hasAutoDispatchScope ? "settings.mcpServer.autoDispatchMaxHourlyHelp" : "settings.mcpServer.maxHourlyHelp")}
+                    </FieldDescription>
                   </Field>
                 </>
               ) : null}

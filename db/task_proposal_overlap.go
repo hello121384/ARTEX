@@ -30,6 +30,7 @@ type ProposalOverlap struct {
 	UnmatchedAssetIDs []int64         `json:"unmatched_asset_ids"`
 	ReviewKey         string          `json:"review_key"`
 	Truncated         bool            `json:"truncated"`
+	allMatches        []ProposalMatch
 }
 
 // Only local facts enter this query. Never join a related task's context into
@@ -102,6 +103,10 @@ ORDER BY (count(h.asset_id)>0) DESC, (c.text_match='goal') DESC,
 func normalizedGoal(s string) string { return strings.ToLower(strings.Join(strings.Fields(s), " ")) }
 
 func CheckProposalOverlap(ctx context.Context, q proposalQueryer, in ProposalInput, allowed []int64, excludeDraftID int64) (*ProposalOverlap, error) {
+	return checkProposalOverlap(ctx, q, in, allowed, excludeDraftID, false)
+}
+
+func checkProposalOverlap(ctx context.Context, q proposalQueryer, in ProposalInput, allowed []int64, excludeDraftID int64, retainAll bool) (*ProposalOverlap, error) {
 	in, err := normalizeProposal(in, allowed)
 	if err != nil {
 		return nil, err
@@ -150,6 +155,9 @@ func CheckProposalOverlap(ctx context.Context, q proposalQueryer, in ProposalInp
 		m.CreatedAt = m.CreatedAt.UTC()
 		if err := enc.Encode(m); err != nil {
 			return nil, err
+		}
+		if retainAll {
+			result.allMatches = append(result.allMatches, m)
 		}
 		if len(result.Matches) < 100 {
 			result.Matches = append(result.Matches, m)

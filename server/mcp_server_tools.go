@@ -66,6 +66,11 @@ func (s *Server) mcpTools() []mcpTool {
 			Schema:      mcpProposalSchema(true), Run: s.mcpSubmitTaskDraft,
 		},
 		{
+			Name: "auto_dispatch_task", Scope: db.APIScopeTaskAutoDispatch,
+			Description: "自动创建并启动企业资产安全测试任务。仅使用所选企业资产 ID。相同目标的在途或已有证据资产会跳过；部分重合时只派发剩余资产。令牌需绑定企业并设置任务数上限。相同请求重试请沿用 request_id。" + mcpUntrustedNote,
+			Schema:      mcpProposalSchema(true), Run: s.mcpAutoDispatchTask,
+		},
+		{
 			Name: "list_tasks", Scope: db.APIScopeRead,
 			Description: "列出任务，最新的在前。可按企业、任务分类、状态筛选——「某个项目的任务」即某企业或某分类下的任务。" +
 				"每条含 id/名称/描述/目标/状态/运行时长/企业/分类/漏洞数。" + mcpUntrustedNote,

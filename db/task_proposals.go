@@ -35,13 +35,16 @@ type ProposalAsset struct {
 
 type TaskProposal struct {
 	ProposalInput
-	ID          int64           `json:"id"`
-	CompanyName string          `json:"company_name"`
-	Assets      []ProposalAsset `json:"assets"`
-	Status      string          `json:"status"`
-	Version     int64           `json:"version"`
-	TaskID      int64           `json:"task_id,omitempty"`
-	CreatedAt   time.Time       `json:"created_at"`
+	ID                int64           `json:"id"`
+	CompanyName       string          `json:"company_name"`
+	Assets            []ProposalAsset `json:"assets"`
+	Status            string          `json:"status"`
+	Version           int64           `json:"version"`
+	TaskID            int64           `json:"task_id,omitempty"`
+	DuplicateAssetIDs []int64         `json:"duplicate_asset_ids,omitempty"`
+	DuplicateTaskIDs  []int64         `json:"duplicate_task_ids,omitempty"`
+	DuplicateDraftIDs []int64         `json:"duplicate_draft_ids,omitempty"`
+	CreatedAt         time.Time       `json:"created_at"`
 }
 
 type proposalQueryer interface {
@@ -88,7 +91,7 @@ func validateProposalAssets(ctx context.Context, q proposalQueryer, in ProposalI
 	return nil
 }
 
-const proposalColumns = `SELECT p.id,p.version,p.status,p.company_id,c.name,p.goal,array_to_json(p.asset_ids),COALESCE(p.task_id,0),p.created_at,
+const proposalColumns = `SELECT p.id,p.version,p.status,p.company_id,c.name,p.goal,array_to_json(p.asset_ids),COALESCE(p.task_id,0),array_to_json(p.duplicate_asset_ids),array_to_json(p.duplicate_task_ids),array_to_json(p.duplicate_draft_ids),p.created_at,
     COALESCE((SELECT json_agg(json_build_object('id',a.id,'type',a.type,'label',
         COALESCE(NULLIF(a.url,''),NULLIF(a.domain,''),NULLIF(a.ip,''),NULLIF(a.app_name,''),a.id::text)) ORDER BY a.id)
         FROM assets a WHERE a.id=ANY(p.asset_ids) AND a.company_id=p.company_id),'[]'::json)
@@ -96,14 +99,23 @@ const proposalColumns = `SELECT p.id,p.version,p.status,p.company_id,c.name,p.go
 
 func scanProposal(row interface{ Scan(...any) error }) (*TaskProposal, error) {
 	var p TaskProposal
-	var ids, assets []byte
-	if err := row.Scan(&p.ID, &p.Version, &p.Status, &p.CompanyID, &p.CompanyName, &p.Goal, &ids, &p.TaskID, &p.CreatedAt, &assets); err != nil {
+	var ids, assets, duplicateAssets, duplicateTasks, duplicateDrafts []byte
+	if err := row.Scan(&p.ID, &p.Version, &p.Status, &p.CompanyID, &p.CompanyName, &p.Goal, &ids, &p.TaskID, &duplicateAssets, &duplicateTasks, &duplicateDrafts, &p.CreatedAt, &assets); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(ids, &p.AssetIDs); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(assets, &p.Assets); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(duplicateAssets, &p.DuplicateAssetIDs); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(duplicateTasks, &p.DuplicateTaskIDs); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(duplicateDrafts, &p.DuplicateDraftIDs); err != nil {
 		return nil, err
 	}
 	return &p, nil
@@ -185,6 +197,46 @@ func (d *DB) SubmitTaskProposal(ctx context.Context, tokenID int64, requestID st
 		return nil, err
 	}
 	return p, tx.Commit()
+}
+
+// proposalInputHash signs the normalized input without including its token or request_id.
+func proposalInputHash(in ProposalInput) (string, error) {
+	data, err := json.Marshal(in)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// GetTaskProposalByRequest verifies idempotency before an automatic dispatcher spends quota.
+func (d *DB) GetTaskProposalByRequest(ctx context.Context, tokenID int64, requestID string, in ProposalInput, allowed []int64) (*TaskProposal, bool, error) {
+	in, err := normalizeProposal(in, allowed)
+	if err != nil {
+		return nil, false, err
+	}
+	requestID = strings.TrimSpace(requestID)
+	if tokenID <= 0 || requestID == "" || utf8.RuneCountInString(requestID) > 128 {
+		return nil, false, fmt.Errorf("%w: invalid request_id", ErrProposalInvalid)
+	}
+	hash, err := proposalInputHash(in)
+	if err != nil {
+		return nil, false, err
+	}
+	var id int64
+	var storedHash string
+	err = d.QueryRowContext(ctx, "SELECT id,request_hash FROM task_proposals WHERE token_id=$1 AND request_id=$2", tokenID, requestID).Scan(&id, &storedHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if storedHash != hash {
+		return nil, false, fmt.Errorf("%w: request_id was used for different input", ErrProposalConflict)
+	}
+	p, err := d.GetTaskProposal(ctx, id)
+	return p, err == nil, err
 }
 
 func (d *DB) EditTaskProposal(ctx context.Context, id, version int64, in ProposalInput) (*TaskProposal, error) {

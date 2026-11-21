@@ -222,7 +222,7 @@ func (s *Server) serveMCP(w http.ResponseWriter, r *http.Request) {
 				"inputSchema": tool.Schema,
 				"annotations": map[string]any{
 					"readOnlyHint":    tool.Scope == db.APIScopeRead || tool.Scope == db.APIScopeAssetsRead || tool.Name == "check_task_overlap",
-					"destructiveHint": false,
+					"destructiveHint": tool.Scope == db.APIScopeTaskAutoDispatch,
 				},
 			})
 		}

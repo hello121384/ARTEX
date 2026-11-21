@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 
 	"github.com/Autumn-27/artex/db"
@@ -13,8 +14,12 @@ import (
 )
 
 func mcpInstructionsForToken(token *db.APIToken) string {
-	if token.HasScope(db.APIScopeAssetsRead) || token.HasScope(db.APIScopeTaskPropose) {
-		return fmt.Sprintf("ARTEX 企业资产与任务草稿。授权企业 ID 为 %v。任务草稿由操作人在任务页审核。%s", token.CompanyIDs, mcpUntrustedNote)
+	if token.HasScope(db.APIScopeAssetsRead) || token.HasScope(db.APIScopeTaskPropose) || token.HasScope(db.APIScopeTaskAutoDispatch) {
+		instruction := "授权企业 ID 为 %v。"
+		if token.HasScope(db.APIScopeTaskAutoDispatch) {
+			return fmt.Sprintf("ARTEX 企业资产。%s 外部 Agent 可自动创建并启动授权企业内的资产测试任务，必须只使用清单中的资产 ID。平台会跳过同目标重合资产。%s", fmt.Sprintf(instruction, token.CompanyIDs), mcpUntrustedNote)
+		}
+		return fmt.Sprintf("ARTEX 企业资产与任务草稿。"+instruction+"任务草稿由操作人在任务页审核。%s", token.CompanyIDs, mcpUntrustedNote)
 	}
 	return mcpInstructions
 }
@@ -149,6 +154,66 @@ func (s *Server) mcpSubmitTaskDraft(ctx context.Context, token *db.APIToken, raw
 		return mcpProposalFailure(err), nil
 	}
 	return jsonResult(map[string]any{"draft_id": draft.ID, "status": draft.Status})
+}
+
+func (s *Server) mcpAutoDispatchTask(ctx context.Context, token *db.APIToken, raw json.RawMessage) (actool.Result, error) {
+	input, requestID, err := mcpProposalArgs(token, raw)
+	if err != nil {
+		return actool.Errorf(err.Error()), nil
+	}
+	pg := s.m.PG()
+	s.mcpCreateMu.Lock()
+	defer s.mcpCreateMu.Unlock()
+
+	if existing, found, err := pg.GetTaskProposalByRequest(ctx, token.ID, requestID, input, token.CompanyIDs); err != nil {
+		return mcpProposalFailure(err), nil
+	} else if found {
+		switch existing.Status {
+		case "confirmed":
+			return jsonResult(map[string]any{"status": "dispatched", "task_id": existing.TaskID, "asset_ids": existing.AssetIDs, "duplicate_asset_ids": existing.DuplicateAssetIDs, "duplicate_task_ids": existing.DuplicateTaskIDs, "duplicate_draft_ids": existing.DuplicateDraftIDs, "already_processed": true})
+		case "deduplicated":
+			return jsonResult(map[string]any{"status": "deduplicated", "duplicate_asset_ids": existing.DuplicateAssetIDs, "duplicate_task_ids": existing.DuplicateTaskIDs, "duplicate_draft_ids": existing.DuplicateDraftIDs, "already_processed": true})
+		case "withdrawn":
+			return mcpProposalFailure(db.ErrProposalConflict), nil
+		}
+	}
+
+	if message, err := s.mcpCheckQuota(token); err != nil {
+		return actool.Errorf("任务配额检查失败"), nil
+	} else if message != "" {
+		return actool.Errorf(message), nil
+	}
+
+	s.m.companyMu.Lock()
+	result, err := pg.AutoDispatchTaskProposal(ctx, token.ID, requestID, input, token.CompanyIDs)
+	var task *Task
+	if err == nil && result.Task != nil {
+		task = s.m.registerCreatedTask(result.Task)
+	}
+	s.m.companyMu.Unlock()
+	if err != nil {
+		return mcpProposalFailure(err), nil
+	}
+
+	response := map[string]any{
+		"status": result.Status, "asset_ids": result.AssetIDs,
+		"duplicate_asset_ids": result.DuplicateAssetIDs, "duplicate_task_ids": result.DuplicateTaskIDs,
+		"duplicate_draft_ids": result.DuplicateDraftIDs, "already_processed": result.AlreadyProcessed,
+	}
+	if result.TaskID > 0 {
+		response["task_id"] = result.TaskID
+	}
+	if task != nil {
+		if err := pg.RecordAPITokenTask(token.ID, result.TaskID); err != nil {
+			response["warning"] = "任务已进入运行队列，但令牌用量记录失败。"
+			log.Printf("[mcp-server] automatic task %s quota record: %v", task.ID, err)
+		}
+		if _, err := s.admitTask(task, "bootstrap"); err != nil {
+			response["warning"] = "任务已创建，请在任务页查看运行状态。"
+			log.Printf("[mcp-server] automatic task %s admission: %v", task.ID, err)
+		}
+	}
+	return jsonResult(response)
 }
 
 func (s *Server) mcpGetTaskGraph(ctx context.Context, token *db.APIToken, raw json.RawMessage) (actool.Result, error) {

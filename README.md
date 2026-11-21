@@ -413,6 +413,7 @@ curl -s https://artex.example.com/mcp \
 | `read` | `list_companies` / `list_task_categories` / `list_llm_profiles` | 建任务时可选的企业、分类、模型配置（不含 API Key） |
 | `assets:read` | `list_company_assets` | 按企业与类型分页查看资产，默认列出根域名 |
 | `task:propose` | `check_task_overlap` / `submit_task_draft` | 检查工作重合情况、提交待人工确认的草稿。重试草稿提交时沿用原 `request_id` |
+| `task:auto_dispatch` | `auto_dispatch_task` | 对所选企业内的资产查重并自动创建、启动任务；跳过相同目标下已在处理或已有确认事实的资产。令牌需选择企业并设置 1–3 个未结束任务、每小时 1–10 个任务上限 |
 | `task:create` | `spawn_task` | 新建并启动任务，可带 `company_ids`、`category_id` |
 | `task:control` | `pause_task` / `resume_task` / `add_task_hint` | 暂停、恢复、补充提示 |
 
@@ -420,7 +421,7 @@ ARTEX 没有独立的「项目」实体。智能体说的“某个项目”对�
 
 不会暴露的能力：建/改自定义工具、MCP、skill，workspace 文件读写，LLM 密钥，系统设置。
 
-资产查看和草稿权限需要显式选定企业，且不能与任务创建或控制权限放在同一令牌。草稿提交后可在任务页审阅。
+资产查看、草稿和自动派发权限需要显式选定企业，不能与直接创建或控制任务的权限放在同一令牌。`task:auto_dispatch` 会跳过已在处理的同目标资产，并立即启动其余任务。只为已授权企业启用，并设置令牌并发和每小时上限。
 
 #### 令牌的限制项
 

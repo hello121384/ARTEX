@@ -23,19 +23,22 @@ const SettingMCPServerAccess = "mcp_server_access"
 
 // API token scopes. A tool is callable only when the token carries its scope.
 const (
-	APIScopeRead        = "read"
-	APIScopeTaskCreate  = "task:create"
-	APIScopeTaskControl = "task:control"
-	APIScopeAssetsRead  = "assets:read"
-	APIScopeTaskPropose = "task:propose"
+	APIScopeRead             = "read"
+	APIScopeTaskCreate       = "task:create"
+	APIScopeTaskControl      = "task:control"
+	APIScopeAssetsRead       = "assets:read"
+	APIScopeTaskPropose      = "task:propose"
+	APIScopeTaskAutoDispatch = "task:auto_dispatch"
 )
 
 const (
 	// APITokenPrefix makes a leaked token recognisable to secret scanners.
-	APITokenPrefix       = "artex_mcp_"
-	MaxAPITokenNameRunes = 80
-	MaxAPITokenCompanies = 50
-	MaxAPITokenLimit     = 10000
+	APITokenPrefix              = "artex_mcp_"
+	MaxAPITokenNameRunes        = 80
+	MaxAPITokenCompanies        = 50
+	MaxAPITokenLimit            = 10000
+	MaxAutoDispatchActiveTasks  = 3
+	MaxAutoDispatchTasksPerHour = 10
 	// mcpAuditKeep bounds the audit table; older rows are trimmed on insert.
 	mcpAuditKeep = 20000
 )
@@ -103,7 +106,7 @@ func NormalizeAPITokenInput(in APITokenInput) (APITokenInput, error) {
 	for _, s := range in.Scopes {
 		s = strings.TrimSpace(s)
 		switch s {
-		case APIScopeRead, APIScopeTaskCreate, APIScopeTaskControl, APIScopeAssetsRead, APIScopeTaskPropose:
+		case APIScopeRead, APIScopeTaskCreate, APIScopeTaskControl, APIScopeAssetsRead, APIScopeTaskPropose, APIScopeTaskAutoDispatch:
 		default:
 			return in, fmt.Errorf("%w: 未知的权限范围 %q", ErrAPITokenInvalid, s)
 		}
@@ -133,12 +136,21 @@ func NormalizeAPITokenInput(in APITokenInput) (APITokenInput, error) {
 	}
 	sort.Slice(companies, func(i, j int) bool { return companies[i] < companies[j] })
 	in.CompanyIDs = companies
-	if seen[APIScopeAssetsRead] || seen[APIScopeTaskPropose] {
+	if seen[APIScopeAssetsRead] || seen[APIScopeTaskPropose] || seen[APIScopeTaskAutoDispatch] {
 		if len(companies) == 0 {
-			return in, fmt.Errorf("%w: 查看资产和提交草稿需要指定企业", ErrAPITokenInvalid)
+			return in, fmt.Errorf("%w: 查看资产、提交草稿和自动派发需要指定企业", ErrAPITokenInvalid)
 		}
 		if seen[APIScopeTaskCreate] || seen[APIScopeTaskControl] {
-			return in, fmt.Errorf("%w: 资产和草稿权限不能与创建或控制任务的权限同时使用", ErrAPITokenInvalid)
+			return in, fmt.Errorf("%w: 资产和派发权限不能与直接创建或控制任务的权限同时使用", ErrAPITokenInvalid)
+		}
+	}
+	if seen[APIScopeTaskAutoDispatch] {
+		if seen[APIScopeTaskPropose] {
+			return in, fmt.Errorf("%w: 自动派发令牌不能同时持有草稿权限", ErrAPITokenInvalid)
+		}
+		if in.MaxActiveTasks < 1 || in.MaxActiveTasks > MaxAutoDispatchActiveTasks ||
+			in.MaxTasksPerHour < 1 || in.MaxTasksPerHour > MaxAutoDispatchTasksPerHour {
+			return in, fmt.Errorf("%w: 自动派发令牌需要设置同时运行数（1–%d）和每小时任务数（1–%d）", ErrAPITokenInvalid, MaxAutoDispatchActiveTasks, MaxAutoDispatchTasksPerHour)
 		}
 	}
 	if in.MaxActiveTasks < 0 || in.MaxActiveTasks > MaxAPITokenLimit ||

@@ -1708,8 +1708,7 @@ CREATE TABLE IF NOT EXISTS api_token_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_api_token_tasks_recent ON api_token_tasks(token_id, created_at DESC);
 
--- Human-reviewed proposals keep the original submission signature across edits.
--- Token and task identifiers survive removal of their original records.
+-- Task proposals retain the original request signature for safe MCP retries.
 CREATE TABLE IF NOT EXISTS task_proposals (
     id             BIGSERIAL PRIMARY KEY,
     company_id     BIGINT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -1718,13 +1717,22 @@ CREATE TABLE IF NOT EXISTS task_proposals (
     request_hash   TEXT NOT NULL,
     goal           TEXT NOT NULL,
     asset_ids      BIGINT[] NOT NULL CHECK (cardinality(asset_ids) > 0),
-    status         TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','withdrawn')),
+    status         TEXT NOT NULL DEFAULT 'pending',
     task_id        BIGINT UNIQUE,
+    duplicate_asset_ids BIGINT[] NOT NULL DEFAULT '{}',
+    duplicate_task_ids BIGINT[] NOT NULL DEFAULT '{}',
+    duplicate_draft_ids BIGINT[] NOT NULL DEFAULT '{}',
     version        BIGINT NOT NULL DEFAULT 1,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK ((status='confirmed') = (task_id IS NOT NULL)),
     UNIQUE (token_id, request_id)
 );
+ALTER TABLE task_proposals ADD COLUMN IF NOT EXISTS duplicate_asset_ids BIGINT[] NOT NULL DEFAULT '{}';
+ALTER TABLE task_proposals ADD COLUMN IF NOT EXISTS duplicate_task_ids BIGINT[] NOT NULL DEFAULT '{}';
+ALTER TABLE task_proposals ADD COLUMN IF NOT EXISTS duplicate_draft_ids BIGINT[] NOT NULL DEFAULT '{}';
+ALTER TABLE task_proposals DROP CONSTRAINT IF EXISTS task_proposals_status_check;
+ALTER TABLE task_proposals ADD CONSTRAINT task_proposals_status_check CHECK (status IN ('pending','confirmed','withdrawn','deduplicated'));
+
 CREATE INDEX IF NOT EXISTS idx_task_proposals_company_pending
     ON task_proposals(company_id,id) WHERE status='pending';
 CREATE INDEX IF NOT EXISTS idx_task_proposals_assets ON task_proposals USING GIN(asset_ids);

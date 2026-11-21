@@ -564,6 +564,7 @@ export const settingsMessages = {
   "settings.mcpServer.status.expired": ["已过期", "Expired"],
   "settings.mcpServer.scope.assetsRead": ["查看资产库", "View asset inventory"],
   "settings.mcpServer.scope.taskPropose": ["提交任务草稿", "Propose tasks"],
+  "settings.mcpServer.scope.taskAutoDispatch": ["自动派发并启动任务", "Automatically dispatch and start tasks"],
   "settings.mcpServer.scopeHelp.assetsRead": [
     "分页查看所选企业的资产。",
     "Read the selected companies' asset inventories.",
@@ -572,9 +573,13 @@ export const settingsMessages = {
     "检查已有任务的重合情况，提交草稿供人工确认。",
     "Check for overlapping work and submit drafts for human review.",
   ],
+  "settings.mcpServer.scopeHelp.taskAutoDispatch": [
+    "在所选企业的资产中自动去重并启动任务。需要绑定企业，同时设置最多 3 个未结束任务、每小时最多 10 个。只应授予已获授权的企业。",
+    "Deduplicate and start tasks for assets in selected companies. Requires company access and limits of at most 3 active tasks and 10 per hour. Grant this only for authorized companies.",
+  ],
   "settings.mcpServer.proposalCompaniesHelp": [
-    "资产与草稿权限至少需要选择一家企业。执行任务需要使用独立令牌。",
-    "Select at least one company for inventory and proposal access. Task execution requires a separate token.",
+    "资产查看、任务草稿和自动派发需要至少选择一家企业。",
+    "Select at least one company for asset access, proposals, or automatic dispatch.",
   ],
   "settings.mcpServer.scope.read": ["只读", "Read"],
   "settings.mcpServer.scope.taskCreate": ["创建任务", "Create tasks"],
@@ -633,8 +638,16 @@ export const settingsMessages = {
     "此令牌创建的、尚未结束的任务数上限（含暂停和排队）。0 = 不限",
     "Maximum number of unfinished tasks created by this token, including paused and queued ones. 0 = no limit",
   ],
+  "settings.mcpServer.autoDispatchMaxActiveHelp": [
+    "自动派发令牌最多同时保留 3 个未结束任务，必须设置为 1 到 3。",
+    "Automatic dispatch tokens can have at most 3 unfinished tasks. Set a limit from 1 to 3.",
+  ],
   "settings.mcpServer.maxHourly": ["每小时建任务上限", "Tasks per hour limit"],
   "settings.mcpServer.maxHourlyHelp": ["0 = 不限", "0 = no limit"],
+  "settings.mcpServer.autoDispatchMaxHourlyHelp": [
+    "自动派发令牌每小时最多创建 10 个任务，必须设置为 1 到 10。",
+    "Automatic dispatch tokens can create at most 10 tasks per hour. Set a limit from 1 to 10.",
+  ],
   "settings.mcpServer.create": ["创建", "Create"],
   "settings.mcpServer.creating": ["创建中…", "Creating…"],
   "settings.mcpServer.createdTitle": ["令牌已创建", "Token created"],
