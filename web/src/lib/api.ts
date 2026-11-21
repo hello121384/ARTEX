@@ -165,7 +165,7 @@ export async function apiFetch(input: string, init?: RequestInit): Promise<Respo
   return response;
 }
 
-export type McpServerScope = "read" | "task:create" | "task:control";
+export type McpServerScope = "read" | "assets:read" | "task:propose" | "task:create" | "task:control";
 
 export interface McpServerSettings {
   enabled: boolean;

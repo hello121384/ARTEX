@@ -227,6 +227,15 @@ func (d *DB) CreateTaskWithOptions(description, goal string, opts TaskCreateOpti
 		return nil, err
 	}
 	defer tx.Rollback()
+	t, err := createTaskTx(tx, description, goal, opts)
+	if err != nil {
+		return nil, err
+	}
+	return t, tx.Commit()
+}
+
+// createTaskTx writes a task and its initial context in the caller's transaction.
+func createTaskTx(tx *sql.Tx, description, goal string, opts TaskCreateOptions) (*Task, error) {
 	var expID int64
 	if err := tx.QueryRow(`INSERT INTO explorations(description, goal) VALUES ($1,$2) RETURNING id`, description, goal).Scan(&expID); err != nil {
 		return nil, err
@@ -327,7 +336,7 @@ RETURNING id, status, paused, created_at`, opts.Name, opts.Remark, opts.Category
 			t.QueueMode = "bootstrap"
 		}
 	}
-	return t, tx.Commit()
+	return t, nil
 }
 
 func insertTaskCompanies(tx *sql.Tx, taskID int64, companyIDs []int64) error {

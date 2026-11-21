@@ -45,6 +45,27 @@ func intParam(desc string) map[string]any {
 func (s *Server) mcpTools() []mcpTool {
 	return []mcpTool{
 		{
+			Name: "list_company_assets", Scope: db.APIScopeAssetsRead,
+			Description: "分页查看令牌获准企业的资产清单，默认只列根域名。" + mcpUntrustedNote,
+			Schema: objSchema(map[string]any{
+				"company_id": intParam("授权企业 ID"),
+				"type":       map[string]any{"type": "string", "enum": []string{"root_domain", "subdomain", "ip", "service", "endpoint", "app"}, "default": "root_domain"},
+				"offset":     map[string]any{"type": "integer", "minimum": 0},
+				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "default": 25},
+			}, "company_id"),
+			Run: s.mcpListCompanyAssets,
+		},
+		{
+			Name: "check_task_overlap", Scope: db.APIScopeTaskPropose,
+			Description: "按企业、资产和工作目标比对已有任务及待审草稿，返回重合依据。" + mcpUntrustedNote,
+			Schema:      mcpProposalSchema(false), Run: s.mcpCheckTaskOverlap,
+		},
+		{
+			Name: "submit_task_draft", Scope: db.APIScopeTaskPropose,
+			Description: "保存待人工审核的任务草稿。不会启动任务。重试同一次提交时请使用相同的 request_id。",
+			Schema:      mcpProposalSchema(true), Run: s.mcpSubmitTaskDraft,
+		},
+		{
 			Name: "list_tasks", Scope: db.APIScopeRead,
 			Description: "列出任务，最新的在前。可按企业、任务分类、状态筛选——「某个项目的任务」即某企业或某分类下的任务。" +
 				"每条含 id/名称/描述/目标/状态/运行时长/企业/分类/漏洞数。" + mcpUntrustedNote,
@@ -73,9 +94,7 @@ func (s *Server) mcpTools() []mcpTool {
 			Name: "get_task_graph", Scope: db.APIScopeRead,
 			Description: "读指定任务的探索图总览：资产计数、待探索方向、发现、覆盖情况。" + mcpUntrustedNote,
 			Schema:      objSchema(map[string]any{"task_id": strParam("任务 id")}, "task_id"),
-			Run: func(ctx context.Context, token *db.APIToken, in json.RawMessage) (actool.Result, error) {
-				return s.mcpDelegate(ctx, token, in, s.toolGetTaskGraph())
-			},
+			Run:         s.mcpGetTaskGraph,
 		},
 		{
 			Name: "list_task_findings", Scope: db.APIScopeRead,

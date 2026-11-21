@@ -1708,6 +1708,27 @@ CREATE TABLE IF NOT EXISTS api_token_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_api_token_tasks_recent ON api_token_tasks(token_id, created_at DESC);
 
+-- Human-reviewed proposals keep the original submission signature across edits.
+-- Token and task identifiers survive removal of their original records.
+CREATE TABLE IF NOT EXISTS task_proposals (
+    id             BIGSERIAL PRIMARY KEY,
+    company_id     BIGINT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    token_id       BIGINT NOT NULL,
+    request_id     TEXT NOT NULL,
+    request_hash   TEXT NOT NULL,
+    goal           TEXT NOT NULL,
+    asset_ids      BIGINT[] NOT NULL CHECK (cardinality(asset_ids) > 0),
+    status         TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','withdrawn')),
+    task_id        BIGINT UNIQUE,
+    version        BIGINT NOT NULL DEFAULT 1,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK ((status='confirmed') = (task_id IS NOT NULL)),
+    UNIQUE (token_id, request_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_proposals_company_pending
+    ON task_proposals(company_id,id) WHERE status='pending';
+CREATE INDEX IF NOT EXISTS idx_task_proposals_assets ON task_proposals USING GIN(asset_ids);
+
 -- token_id 不加外键：令牌删除后审计仍要留存，token_name 冗余保存当时的名称。
 CREATE TABLE IF NOT EXISTS mcp_audit_log (
     id          BIGSERIAL PRIMARY KEY,

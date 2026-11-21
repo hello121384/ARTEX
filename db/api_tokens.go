@@ -26,6 +26,8 @@ const (
 	APIScopeRead        = "read"
 	APIScopeTaskCreate  = "task:create"
 	APIScopeTaskControl = "task:control"
+	APIScopeAssetsRead  = "assets:read"
+	APIScopeTaskPropose = "task:propose"
 )
 
 const (
@@ -100,7 +102,9 @@ func NormalizeAPITokenInput(in APITokenInput) (APITokenInput, error) {
 	scopes := make([]string, 0, len(in.Scopes))
 	for _, s := range in.Scopes {
 		s = strings.TrimSpace(s)
-		if s != APIScopeRead && s != APIScopeTaskCreate && s != APIScopeTaskControl {
+		switch s {
+		case APIScopeRead, APIScopeTaskCreate, APIScopeTaskControl, APIScopeAssetsRead, APIScopeTaskPropose:
+		default:
 			return in, fmt.Errorf("%w: 未知的权限范围 %q", ErrAPITokenInvalid, s)
 		}
 		if !seen[s] {
@@ -129,6 +133,14 @@ func NormalizeAPITokenInput(in APITokenInput) (APITokenInput, error) {
 	}
 	sort.Slice(companies, func(i, j int) bool { return companies[i] < companies[j] })
 	in.CompanyIDs = companies
+	if seen[APIScopeAssetsRead] || seen[APIScopeTaskPropose] {
+		if len(companies) == 0 {
+			return in, fmt.Errorf("%w: 查看资产和提交草稿需要指定企业", ErrAPITokenInvalid)
+		}
+		if seen[APIScopeTaskCreate] || seen[APIScopeTaskControl] {
+			return in, fmt.Errorf("%w: 资产和草稿权限不能与创建或控制任务的权限同时使用", ErrAPITokenInvalid)
+		}
+	}
 	if in.MaxActiveTasks < 0 || in.MaxActiveTasks > MaxAPITokenLimit ||
 		in.MaxTasksPerHour < 0 || in.MaxTasksPerHour > MaxAPITokenLimit {
 		return in, fmt.Errorf("%w: 限额必须在 0 到 %d 之间", ErrAPITokenInvalid, MaxAPITokenLimit)

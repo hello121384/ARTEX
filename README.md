@@ -411,12 +411,16 @@ curl -s https://artex.example.com/mcp \
 | `read` | `get_task_graph` | 任务的探索图总览 |
 | `read` | `list_task_findings` | 任务的确认漏洞（不含原始请求/响应流量） |
 | `read` | `list_companies` / `list_task_categories` / `list_llm_profiles` | 建任务时可选的企业、分类、模型配置（不含 API Key） |
+| `assets:read` | `list_company_assets` | 按企业与类型分页查看资产，默认列出根域名 |
+| `task:propose` | `check_task_overlap` / `submit_task_draft` | 检查工作重合情况、提交待人工确认的草稿。重试草稿提交时沿用原 `request_id` |
 | `task:create` | `spawn_task` | 新建并启动任务，可带 `company_ids`、`category_id` |
 | `task:control` | `pause_task` / `resume_task` / `add_task_hint` | 暂停、恢复、补充提示 |
 
 ARTEX 没有独立的「项目」实体。智能体说的“某个项目”对应某个企业或某个任务分类下的一组任务。
 
 不会暴露的能力：建/改自定义工具、MCP、skill，workspace 文件读写，LLM 密钥，系统设置。
+
+资产查看和草稿权限需要显式选定企业，且不能与任务创建或控制权限放在同一令牌。草稿提交后可在任务页审阅。
 
 #### 令牌的限制项
 

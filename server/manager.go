@@ -1250,12 +1250,16 @@ func (m *Manager) CreateTaskWithOptions(description, goal string, opts pgdb.Task
 	if err != nil {
 		return nil, err
 	}
+	return m.registerCreatedTask(pt), nil
+}
+
+func (m *Manager) registerCreatedTask(pt *pgdb.Task) *Task {
 	t := taskFromPG(pt, m.pg.Exploration(pt.ExplorationID), m.interceptor)
 	m.mu.Lock()
 	m.tasks[t.ID] = t
 	m.active = t.ID
 	m.mu.Unlock()
-	return t, nil
+	return t
 }
 
 // RenameTaskCategory persists a category name and refreshes every live task DTO

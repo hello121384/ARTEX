@@ -146,6 +146,8 @@ import type {
 import { MAX_TASK_REMARK_RUNES, MAX_TASK_WORKER_COUNT, parseWorkerCountInput } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
+import { TaskProposalsPanel } from "./task-proposals-panel";
+
 // fmtBytes renders a human file size for the upload manifest.
 function fmtBytes(n: number): string {
   if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MB`;
@@ -956,6 +958,7 @@ export default function TasksPage() {
     <Tabs value={activeTab} onValueChange={setActiveTab} className="gap-4">
       <TabsList className="mx-4 lg:mx-6">
         <TabsTrigger value="current">{translate("taskUI.currentTasks")}</TabsTrigger>
+        <TabsTrigger value="proposals">{translate("taskProposals.pending")}</TabsTrigger>
         <TabsTrigger value="archived">{translate("taskUI.archived")}</TabsTrigger>
       </TabsList>
       <TabsContent value="current">
@@ -1206,6 +1209,9 @@ export default function TasksPage() {
             />
           </CardContent>
         </Card>
+      </TabsContent>
+      <TabsContent value="proposals">
+        <TaskProposalsPanel onConfirmed={refreshCategoriesAndTasks} />
       </TabsContent>
       <TabsContent value="archived">
         <TaskArchivesPanel onChanged={load} />

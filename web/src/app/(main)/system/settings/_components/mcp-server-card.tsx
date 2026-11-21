@@ -47,6 +47,8 @@ import type { Company } from "@/lib/types";
 // i18next reads as a namespace separator, so they cannot be used as keys.
 const SCOPES: { value: McpServerScope; key: string }[] = [
   { value: "read", key: "read" },
+  { value: "assets:read", key: "assetsRead" },
+  { value: "task:propose", key: "taskPropose" },
   { value: "task:create", key: "taskCreate" },
   { value: "task:control", key: "taskControl" },
 ];
@@ -183,6 +185,9 @@ export function McpServerCard() {
   };
 
   const toggleIn = <T,>(list: T[], value: T, on: boolean) => (on ? [...list, value] : list.filter((v) => v !== value));
+
+  const needsCompanies = form.scopes.includes("assets:read") || form.scopes.includes("task:propose");
+  const hasExecutionScope = form.scopes.includes("task:create") || form.scopes.includes("task:control");
 
   const create = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -448,6 +453,10 @@ export function McpServerCard() {
                       id={`mcp-scope-${scope.key}`}
                       className="mt-0.5"
                       checked={form.scopes.includes(scope.value)}
+                      disabled={
+                        ((scope.value === "assets:read" || scope.value === "task:propose") && hasExecutionScope) ||
+                        ((scope.value === "task:create" || scope.value === "task:control") && needsCompanies)
+                      }
                       onCheckedChange={(on) =>
                         setForm({ ...form, scopes: toggleIn(form.scopes, scope.value, on === true) })
                       }
@@ -485,7 +494,9 @@ export function McpServerCard() {
                     ))}
                   </div>
                 )}
-                <FieldDescription>{t("settings.mcpServer.companiesHelp")}</FieldDescription>
+                <FieldDescription>
+                  {t(needsCompanies ? "settings.mcpServer.proposalCompaniesHelp" : "settings.mcpServer.companiesHelp")}
+                </FieldDescription>
               </Field>
               <Field>
                 <FieldLabel htmlFor="mcp-token-days">{t("settings.mcpServer.expiry")}</FieldLabel>
@@ -537,7 +548,10 @@ export function McpServerCard() {
               <Button type="button" variant="outline" onClick={() => setCreateOpen(false)}>
                 {t("settings.mcpServer.cancel")}
               </Button>
-              <Button type="submit" disabled={creating || form.scopes.length === 0}>
+              <Button
+                type="submit"
+                disabled={creating || form.scopes.length === 0 || (needsCompanies && form.companyIds.length === 0)}
+              >
                 {creating ? t("settings.mcpServer.creating") : t("settings.mcpServer.create")}
               </Button>
             </DialogFooter>

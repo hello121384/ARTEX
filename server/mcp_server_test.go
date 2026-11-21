@@ -398,6 +398,21 @@ func TestMCPServerToolsFollowTokenScopes(t *testing.T) {
 			t.Errorf("read token must not list %s", name)
 		}
 	}
+
+	const proposalToken = db.APITokenPrefix + "proposals"
+	store.add(3, proposalToken, db.APIScopeAssetsRead, db.APIScopeTaskPropose).CompanyIDs = []int64{1}
+	proposalTools := names(proposalToken)
+	for name, readOnly := range map[string]bool{"list_company_assets": true, "check_task_overlap": true, "submit_task_draft": false} {
+		if markedRO, ok := proposalTools[name]; !ok || markedRO != readOnly {
+			t.Errorf("proposal tool %q listed=%v readOnly=%v", name, ok, markedRO)
+		}
+		if _, ok := read[name]; ok {
+			t.Errorf("legacy read token sees %s", name)
+		}
+	}
+	if len(proposalTools) != 3 {
+		t.Fatalf("unexpected proposal tools: %v", proposalTools)
+	}
 	full := names(mcpTestFullToken)
 	if len(full) != 11 || full["spawn_task"] || full["pause_task"] {
 		t.Fatalf("full token tools=%v", full)
@@ -433,12 +448,16 @@ func TestMCPServerToolsFollowTokenScopes(t *testing.T) {
 func TestNormalizeAPITokenInput(t *testing.T) {
 	past := time.Now().Add(-time.Hour)
 	for name, in := range map[string]db.APITokenInput{
-		"empty name":    {Scopes: []string{db.APIScopeRead}},
-		"no scope":      {Name: "x"},
-		"unknown scope": {Name: "x", Scopes: []string{"admin"}},
-		"bad company":   {Name: "x", Scopes: []string{db.APIScopeRead}, CompanyIDs: []int64{0}},
-		"bad limit":     {Name: "x", Scopes: []string{db.APIScopeRead}, MaxActiveTasks: -1},
-		"past expiry":   {Name: "x", Scopes: []string{db.APIScopeRead}, ExpiresAt: &past},
+		"empty name":                      {Scopes: []string{db.APIScopeRead}},
+		"asset inventory without company": {Name: "x", Scopes: []string{db.APIScopeAssetsRead}},
+		"proposals without company":       {Name: "x", Scopes: []string{db.APIScopeTaskPropose}},
+		"asset inventory plus create":     {Name: "x", CompanyIDs: []int64{1}, Scopes: []string{db.APIScopeAssetsRead, db.APIScopeTaskCreate}},
+		"proposal plus control":           {Name: "x", CompanyIDs: []int64{1}, Scopes: []string{db.APIScopeTaskPropose, db.APIScopeTaskControl}},
+		"no scope":                        {Name: "x"},
+		"unknown scope":                   {Name: "x", Scopes: []string{"admin"}},
+		"bad company":                     {Name: "x", Scopes: []string{db.APIScopeRead}, CompanyIDs: []int64{0}},
+		"bad limit":                       {Name: "x", Scopes: []string{db.APIScopeRead}, MaxActiveTasks: -1},
+		"past expiry":                     {Name: "x", Scopes: []string{db.APIScopeRead}, ExpiresAt: &past},
 	} {
 		if _, err := db.NormalizeAPITokenInput(in); err == nil {
 			t.Errorf("%s: accepted", name)

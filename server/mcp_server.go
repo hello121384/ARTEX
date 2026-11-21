@@ -206,7 +206,7 @@ func (s *Server) serveMCP(w http.ResponseWriter, r *http.Request) {
 			"protocolVersion": version,
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 			"serverInfo":      map[string]any{"name": "artex", "title": "ARTEX", "version": BuildVersion},
-			"instructions":    mcpInstructions,
+			"instructions":    mcpInstructionsForToken(token),
 		})
 	case "ping":
 		writeMCPResult(w, req.ID, map[string]any{})
@@ -221,7 +221,7 @@ func (s *Server) serveMCP(w http.ResponseWriter, r *http.Request) {
 				"description": tool.Description,
 				"inputSchema": tool.Schema,
 				"annotations": map[string]any{
-					"readOnlyHint":    tool.Scope == db.APIScopeRead,
+					"readOnlyHint":    tool.Scope == db.APIScopeRead || tool.Scope == db.APIScopeAssetsRead || tool.Name == "check_task_overlap",
 					"destructiveHint": false,
 				},
 			})

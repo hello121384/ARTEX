@@ -562,6 +562,20 @@ export const settingsMessages = {
   "settings.mcpServer.status.active": ["有效", "Active"],
   "settings.mcpServer.status.revoked": ["已吊销", "Revoked"],
   "settings.mcpServer.status.expired": ["已过期", "Expired"],
+  "settings.mcpServer.scope.assetsRead": ["查看资产库", "View asset inventory"],
+  "settings.mcpServer.scope.taskPropose": ["提交任务草稿", "Propose tasks"],
+  "settings.mcpServer.scopeHelp.assetsRead": [
+    "分页查看所选企业的资产。",
+    "Read the selected companies' asset inventories.",
+  ],
+  "settings.mcpServer.scopeHelp.taskPropose": [
+    "检查已有任务的重合情况，提交草稿供人工确认。",
+    "Check for overlapping work and submit drafts for human review.",
+  ],
+  "settings.mcpServer.proposalCompaniesHelp": [
+    "资产与草稿权限至少需要选择一家企业。执行任务需要使用独立令牌。",
+    "Select at least one company for inventory and proposal access. Task execution requires a separate token.",
+  ],
   "settings.mcpServer.scope.read": ["只读", "Read"],
   "settings.mcpServer.scope.taskCreate": ["创建任务", "Create tasks"],
   "settings.mcpServer.scope.taskControl": ["控制任务", "Control tasks"],

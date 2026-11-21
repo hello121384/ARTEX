@@ -216,9 +216,9 @@ ORDER BY task_id, created_at, source_task_id`, ids)
 
 	rows, err = d.Query(`
 SELECT task_id, company_id
-FROM task_scope
-WHERE task_id=ANY($1::bigint[]) AND kind='company' AND company_id IS NOT NULL
-ORDER BY task_id, id`, ids)
+FROM `+taskCompanyMemberships+`
+WHERE task_id=ANY($1::bigint[])
+ORDER BY task_id, position`, ids)
 	if err != nil {
 		return err
 	}
@@ -337,13 +337,23 @@ func (d *DB) TaskSourceIDs(taskID int64) ([]int64, error) {
 	return out, rows.Err()
 }
 
-// TaskCompanyIDs returns the companies whose asset scopes are available to the
-// task. The task_scope rows remain the single source of truth.
+// A reviewed proposal associates the task with a company for display and access
+// control. It grants only the reviewed assets, so it has no company-wide scope.
+const taskCompanyMemberships = `(
+	SELECT task_id, company_id, id AS position FROM task_scope
+	WHERE kind='company' AND company_id IS NOT NULL
+	UNION ALL
+	SELECT p.task_id, p.company_id, 0 AS position FROM task_proposals p
+	WHERE p.status='confirmed' AND p.company_id IS NOT NULL AND NOT EXISTS (
+		SELECT 1 FROM task_scope s WHERE s.task_id=p.task_id AND s.kind='company' AND s.company_id=p.company_id
+	)
+) membership`
+
+// TaskCompanyIDs returns company memberships without expanding the task scope.
 func (d *DB) TaskCompanyIDs(taskID int64) ([]int64, error) {
 	rows, err := d.Query(`
-SELECT company_id FROM task_scope
-WHERE task_id=$1 AND kind='company' AND company_id IS NOT NULL
-ORDER BY id`, taskID)
+SELECT company_id FROM `+taskCompanyMemberships+`
+WHERE task_id=$1 ORDER BY position`, taskID)
 	if err != nil {
 		return nil, err
 	}
