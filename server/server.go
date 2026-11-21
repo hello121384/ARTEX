@@ -928,6 +928,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/companies", s.listCompanies)
 	mux.HandleFunc("POST /api/companies", s.createCompany)
 	mux.HandleFunc("GET /api/companies/{id}", s.getCompany)
+	mux.HandleFunc("GET /api/companies/{id}/asset-graph", s.companyAssetGraph)
 	mux.HandleFunc("DELETE /api/companies/{id}", s.deleteCompany)
 	mux.HandleFunc("POST /api/companies/{id}/scope", s.addCompanyScope)
 	mux.HandleFunc("POST /api/companies/reattribute", s.reattribute)

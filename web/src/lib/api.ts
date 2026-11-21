@@ -22,6 +22,7 @@ import type {
   ChatAttachment,
   CommandRecord,
   Company,
+  CompanyGraphPage,
   CompanyScopeMutation,
   CompanyScopeRule,
   Conversation,
@@ -763,6 +764,10 @@ export const api = {
 
   // ---- companies (企业 + 资产范围；归属唯一来源) ----
   companies: () => get<Company[]>("/companies").then(arr),
+  companyGraphChildren: (companyId: number, parent = "", offset = 0, limit = 25) => {
+    const query = new URLSearchParams({ parent, offset: String(offset), limit: String(limit) });
+    return get<CompanyGraphPage>(`/companies/${companyId || "unassigned"}/asset-graph?${query}`);
+  },
   createCompany: (name: string, scope: CompanyScopeRule[]) =>
     post<{ id: number; created: boolean; scope_added?: number; scope_invalid?: number; scope_errors?: string[] }>(
       "/companies",

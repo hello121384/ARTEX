@@ -437,6 +437,18 @@ export interface Company {
   scope?: ScopeRow[];
 }
 
+export interface CompanyGraphNode {
+  key: string;
+  kind: NewAssetType;
+  label: string;
+  expandable: boolean;
+}
+
+export interface CompanyGraphPage {
+  nodes: CompanyGraphNode[];
+  has_more: boolean;
+}
+
 // ---- Exploration graph (per task) ----
 export type ExploreKind = "task" | "begin" | "goal" | "intent" | "fact" | "finding" | "hint" | "digest";
 export type GoalState = "open" | "met" | "abandoned";

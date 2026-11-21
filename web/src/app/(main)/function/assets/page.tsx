@@ -7,6 +7,7 @@ import {
   BuildingIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  GitForkIcon,
   GlobeIcon,
   KeyRoundIcon,
   LayoutTemplateIcon,
@@ -20,6 +21,7 @@ import {
 import { toast } from "sonner";
 
 import { AssetDslSearch } from "@/components/asset-dsl-search";
+import { GlobalAssetGraph } from "@/components/global-asset-graph";
 import { IntelligencePanel } from "@/components/intelligence-panel";
 import { ScopeTextEditor } from "@/components/scope-text-editor";
 import {
@@ -147,6 +149,9 @@ function AssetsContent() {
   const [rows, setRows] = React.useState<Asset[]>([]);
   const [total, setTotal] = React.useState(0);
   const [companies, setCompanies] = React.useState<Company[]>([]);
+  const [graphTarget, setGraphTarget] = React.useState<"all" | Company | null>(null);
+  const [metaState, setMetaState] = React.useState<"loading" | "ready" | "error">("loading");
+  const metaRequest = React.useRef(0);
   const [counts, setCounts] = React.useState<Record<string, number>>({});
   const [tab, setTab] = React.useState("company");
   const [query, setQuery] = React.useState("");
@@ -171,19 +176,14 @@ function AssetsContent() {
   const [companyDeleting, setCompanyDeleting] = React.useState(false);
 
   // Companies + per-type counts (tab badges) — loaded on demand, no background polling.
-  const loadMeta = React.useCallback(() => {
-    api
-      .companies()
-      .then(setCompanies)
-      .catch(() => {
-        /* Keep the last successful company snapshot on a transient failure. */
-      });
-    api
-      .assetCounts()
-      .then(setCounts)
-      .catch(() => {
-        /* Keep the last successful counters on a transient failure. */
-      });
+  const loadMeta = React.useCallback(async () => {
+    const request = ++metaRequest.current;
+    setMetaState("loading");
+    const [companyResult, countResult] = await Promise.allSettled([api.companies(), api.assetCounts()]);
+    if (request !== metaRequest.current) return;
+    if (companyResult.status === "fulfilled") setCompanies(companyResult.value);
+    if (countResult.status === "fulfilled") setCounts(countResult.value);
+    setMetaState(companyResult.status === "fulfilled" && countResult.status === "fulfilled" ? "ready" : "error");
   }, []);
 
   // Manual refresh: reload counts/companies and re-fetch the current page.
@@ -332,6 +332,11 @@ function AssetsContent() {
 
   const tabCounts: Record<string, number> = { ...counts, company: companies.length };
   const totalAssets = Object.values(counts).reduce((a, b) => a + b, 0);
+  const unassignedCount = totalAssets - companies.reduce((sum, company) => sum + company.asset_count, 0);
+  const graphCompanies =
+    unassignedCount > 0
+      ? [...companies, { id: 0, name: ui("assetGraph.unassigned"), asset_count: unassignedCount }]
+      : companies;
 
   // rows are already the current server-side page.
   const tabData = (type: string): Asset[] => (rowsTab === type ? rows : []);
@@ -355,6 +360,30 @@ function AssetsContent() {
           {assetTargetError}
         </p>
       ) : null}
+      <Dialog
+        open={graphTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setGraphTarget(null);
+        }}
+      >
+        <DialogContent className="flex h-[80dvh] flex-col overflow-hidden sm:max-w-5xl" aria-describedby={undefined}>
+          <DialogHeader>
+            <DialogTitle>{ui("assetGraph.title")}</DialogTitle>
+          </DialogHeader>
+          {graphTarget === "all" && metaState === "loading" && <span role="status">{ui("common.loading")}</span>}
+          {graphTarget === "all" && metaState === "error" && (
+            <div className="flex items-center gap-3">
+              <span role="alert">{ui("assetGraph.loadError")}</span>
+              <Button size="sm" variant="outline" onClick={loadMeta}>
+                {ui("common.retry")}
+              </Button>
+            </div>
+          )}
+          {graphTarget !== null && (graphTarget !== "all" || metaState === "ready") && (
+            <GlobalAssetGraph companies={graphCompanies} company={graphTarget === "all" ? undefined : graphTarget} />
+          )}
+        </DialogContent>
+      </Dialog>
       <Dialog
         open={intelligenceAsset !== null}
         onOpenChange={(open) => {
@@ -388,7 +417,11 @@ function AssetsContent() {
             {ui("screen.76e547a8fa5463")}
             <span className="tabular-nums">{totalAssets}</span> {ui("screen.a5670ed30b06da")}
           </span>
-          {tab !== "company" ? (
+          {tab === "company" ? (
+            <Button variant="outline" size="sm" onClick={() => setGraphTarget("all")}>
+              <GitForkIcon className="size-4" /> {ui("assetGraph.title")}
+            </Button>
+          ) : (
             <Button
               variant="outline"
               size="sm"
@@ -398,7 +431,7 @@ function AssetsContent() {
             >
               {ui("screen.66f5c497a338d1")}
             </Button>
-          ) : null}
+          )}
           {selected.size > 0 && (
             <Button variant="destructive" size="sm" onClick={() => openDelete(Array.from(selected) as number[])}>
               <Trash2Icon className="size-3.5" /> {ui("screen.4f879b6a4b1d4e")}
@@ -463,6 +496,16 @@ function AssetsContent() {
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex items-center justify-end gap-1.5">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="size-7"
+                            aria-label={ui("assetGraph.openCompany", { name: c.name })}
+                            title={ui("assetGraph.openCompany", { name: c.name })}
+                            onClick={() => setGraphTarget(c)}
+                          >
+                            <GitForkIcon className="size-3.5" />
+                          </Button>
                           <EditScopeDialog company={c} onSaved={refresh} />
                           <AppendScopeDialog company={c} onSaved={refresh} />
                           <Button

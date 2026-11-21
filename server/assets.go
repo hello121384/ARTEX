@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -172,6 +173,54 @@ func (s *Server) getCompany(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"company": c, "scope": scope})
+}
+
+// companyAssetGraph returns one page of roots or the children of one graph node.
+func (s *Server) companyAssetGraph(w http.ResponseWriter, r *http.Request) {
+	// The unassigned group contains assets whose company_id is NULL.
+	var id int64
+	var err error
+	if company := r.PathValue("id"); company != "unassigned" {
+		id, err = strconv.ParseInt(company, 10, 64)
+		if err != nil || id <= 0 {
+			writeErr(w, http.StatusBadRequest, "invalid company id")
+			return
+		}
+	}
+	q := r.URL.Query()
+	limit := 25
+	if raw := q.Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > 100 {
+			writeErr(w, http.StatusBadRequest, "limit must be between 1 and 100")
+			return
+		}
+	}
+	offset := 0
+	if raw := q.Get("offset"); raw != "" {
+		value, err := strconv.ParseUint(raw, 10, 31)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "offset must be a non-negative integer")
+			return
+		}
+		offset = int(value)
+	}
+	store := s.assetStore()
+	if store == nil {
+		writeErr(w, http.StatusServiceUnavailable, "database unavailable")
+		return
+	}
+	page, err := store.ListCompanyGraphChildren(r.Context(), id, q.Get("parent"), offset, limit)
+	switch {
+	case errors.Is(err, db.ErrInvalidGraphParent):
+		writeErr(w, http.StatusBadRequest, "invalid graph parent")
+	case errors.Is(err, sql.ErrNoRows):
+		writeErr(w, http.StatusNotFound, "company or graph node not found")
+	case err != nil:
+		writeErr(w, http.StatusInternalServerError, err.Error())
+	default:
+		writeJSON(w, http.StatusOK, page)
+	}
 }
 
 // =====================================================================

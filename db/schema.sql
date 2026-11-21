@@ -91,6 +91,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_service_other
 CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_endpoint     ON assets(url, method) WHERE type = 'endpoint';
 CREATE INDEX IF NOT EXISTS idx_av2_company      ON assets(company_id)       WHERE company_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_av2_company_type ON assets(company_id, type) WHERE company_id IS NOT NULL;
+-- Ordered lookups of root names, including roots represented only by DNS
+-- records. NULL company_id is the unassigned group in the global asset graph.
+CREATE INDEX IF NOT EXISTS idx_av2_graph_company_root_name ON assets (
+    (COALESCE(company_id,0)), (CASE WHEN type='root_domain' THEN domain ELSE root_domain END)
+) WHERE type IN ('root_domain','subdomain');
+-- Data imported without a normalized domain still needs the same host for
+-- both branch expansion and endpoint-to-service lookup.
+CREATE OR REPLACE FUNCTION asset_graph_host(domain_name text, asset_url text, address text)
+RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+    SELECT COALESCE(NULLIF(domain_name,''),
+    trim(both '[]' from lower(substring(asset_url from '^[^:]+://(?:[^/@]+@)?(\[[^]]+\]|[^:/?#]+)'))),
+    NULLIF(address,''))
+$$;
+CREATE INDEX IF NOT EXISTS idx_av2_graph_host_type ON assets (
+    asset_graph_host(domain,url,ip), type, id
+) WHERE type IN ('service','endpoint');
 CREATE INDEX IF NOT EXISTS idx_av2_task_ids     ON assets USING GIN(task_ids);
 CREATE INDEX IF NOT EXISTS idx_av2_domain       ON assets(domain)      WHERE domain IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_av2_root_domain  ON assets(root_domain) WHERE root_domain IS NOT NULL;

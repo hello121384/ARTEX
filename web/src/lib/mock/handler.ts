@@ -15,6 +15,8 @@ import type {
   Asset,
   BatchControlItem,
   Company,
+  CompanyGraphNode,
+  CompanyGraphPage,
   CompanyScopeRule,
   Conversation,
   EvidenceBodyPreview,
@@ -527,6 +529,60 @@ function mockAssetHost(asset: (typeof mockAssets)[number]): { host: string; port
   }
   if (!host) host = asset.ip ?? "";
   return { host, port };
+}
+
+function mockCompanyGraph(companyId: number, parent: string, offset: number, limit: number): CompanyGraphPage {
+  if (companyId !== 0 && !mockCompanies.some((company) => company.id === companyId)) {
+    throw new Error("Company not found");
+  }
+  const assets = mockAssets.filter((asset) => (asset.company_id ?? 0) === companyId);
+  const roots = new Map<string, CompanyGraphNode>();
+  for (const asset of assets) {
+    const domain = asset.type === "root_domain" ? asset.domain : asset.type === "subdomain" ? asset.root_domain : "";
+    if (!domain) continue;
+    if (asset.type === "root_domain" || !roots.has(domain)) {
+      roots.set(domain, {
+        key: asset.type === "root_domain" ? `a:${asset.id}` : `r:${domain}`,
+        kind: "root_domain",
+        label: domain,
+        expandable: true,
+      });
+    }
+  }
+  if (!parent) {
+    const sortedRoots = [...roots.values()].sort((a, b) => a.label.localeCompare(b.label));
+    return {
+      nodes: sortedRoots.slice(offset, offset + limit),
+      has_more: sortedRoots.length > offset + limit,
+    };
+  }
+  const children = new Map<string, CompanyGraphNode[]>();
+  assets.sort((a, b) => a.id - b.id);
+  for (const asset of assets) {
+    if (asset.type === "root_domain") continue;
+    const { host, port } = mockAssetHost(asset);
+    let ancestor: Asset | undefined;
+    if (asset.type === "endpoint" && host) {
+      const services = assets.filter((a) => a.type === "service" && mockAssetHost(a).host === host);
+      ancestor = services.find((a) => mockAssetHost(a).port === port) ?? services[0];
+    }
+    if (!ancestor && (asset.type === "service" || asset.type === "endpoint")) {
+      ancestor =
+        assets.find((a) => a.type === "subdomain" && a.domain && (a.domain === host || a.domain === asset.domain)) ??
+        assets.find((a) => a.type === "ip" && a.ip && (a.ip === host || a.ip === asset.ip));
+    }
+    const root = asset.type === "ip" || asset.type === "app" ? undefined : roots.get(asset.root_domain ?? "");
+    const parentKey = ancestor ? `a:${ancestor.id}` : (root?.key ?? "company");
+    const node = { key: `a:${asset.id}`, kind: asset.type, label: mockAssetLabel(asset), expandable: false };
+    const siblings = children.get(parentKey);
+    if (siblings) siblings.push(node);
+    else children.set(parentKey, [node]);
+  }
+  const siblings = children.get(parent) ?? [];
+  return {
+    nodes: siblings.slice(offset, offset + limit).map((node) => ({ ...node, expandable: children.has(node.key) })),
+    has_more: siblings.length > offset + limit,
+  };
 }
 
 interface MockAssetTreeNode {
@@ -2001,7 +2057,22 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   }
 
   // ── companies ──
-  if (path === "/companies" && m === "GET") return structuredClone(mockCompanies);
+  if (seg[0] === "companies" && seg[2] === "asset-graph" && m === "GET") {
+    const companyId = seg[1] === "unassigned" ? 0 : Number(seg[1]);
+    return mockCompanyGraph(
+      companyId,
+      q.get("parent") ?? "",
+      Number(q.get("offset") ?? 0),
+      Number(q.get("limit") ?? 25),
+    );
+  }
+  if (path === "/companies" && m === "GET") {
+    const counts = new Map<number, number>();
+    for (const asset of mockAssets) {
+      if (asset.company_id) counts.set(asset.company_id, (counts.get(asset.company_id) ?? 0) + 1);
+    }
+    return mockCompanies.map((company) => ({ ...structuredClone(company), asset_count: counts.get(company.id) ?? 0 }));
+  }
   if (path === "/companies" && m === "POST") {
     const name = String(b.name ?? "").trim();
     if (!name) throw new Error("企业名称不能为空");
