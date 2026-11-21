@@ -22,6 +22,7 @@ import { toast } from "sonner";
 
 import { AssetDslSearch } from "@/components/asset-dsl-search";
 import { GlobalAssetGraph } from "@/components/global-asset-graph";
+import { GlobalAssetRelationView } from "@/components/global-asset-relation-view";
 import { IntelligencePanel } from "@/components/intelligence-panel";
 import { ScopeTextEditor } from "@/components/scope-text-editor";
 import {
@@ -366,7 +367,7 @@ function AssetsContent() {
           if (!open) setGraphTarget(null);
         }}
       >
-        <DialogContent className="flex h-[80dvh] flex-col overflow-hidden sm:max-w-5xl" aria-describedby={undefined}>
+        <DialogContent className="flex h-[84dvh] flex-col overflow-hidden sm:max-w-6xl" aria-describedby={undefined}>
           <DialogHeader>
             <DialogTitle>{ui("assetGraph.title")}</DialogTitle>
           </DialogHeader>
@@ -380,7 +381,21 @@ function AssetsContent() {
             </div>
           )}
           {graphTarget !== null && (graphTarget !== "all" || metaState === "ready") && (
-            <GlobalAssetGraph companies={graphCompanies} company={graphTarget === "all" ? undefined : graphTarget} />
+            <Tabs defaultValue="canvas" className="min-h-0 flex-1">
+              <TabsList aria-label={ui("assetGraph.view")}>
+                <TabsTrigger value="canvas">{ui("assetGraph.canvas")}</TabsTrigger>
+                <TabsTrigger value="tree">{ui("assetGraph.tree")}</TabsTrigger>
+              </TabsList>
+              <TabsContent value="canvas" className="flex min-h-0 flex-col">
+                <GlobalAssetRelationView
+                  companies={graphCompanies}
+                  company={graphTarget === "all" ? undefined : graphTarget}
+                />
+              </TabsContent>
+              <TabsContent value="tree" className="min-h-0 overflow-y-auto">
+                <GlobalAssetGraph companies={graphCompanies} company={graphTarget === "all" ? undefined : graphTarget} />
+              </TabsContent>
+            </Tabs>
           )}
         </DialogContent>
       </Dialog>

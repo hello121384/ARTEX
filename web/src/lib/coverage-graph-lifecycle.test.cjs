@@ -123,6 +123,7 @@ function mount() {
       if (id === "react/jsx-runtime")
         return { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) };
       if (id === "@antv/g6") return { Graph };
+      if (id === "@/lib/asset-graph-appearance") return require("./asset-graph-appearance.ts");
       if (id === "@/i18n/use-ui-translation") return { useUITranslation: () => ({ ui, liveUI: ui }) };
       if (id === "@/lib/api")
         return {
